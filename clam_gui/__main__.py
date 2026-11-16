@@ -47,7 +47,7 @@ class Application(Gtk.Application):
         self.menu_model.append_submenu('対象管理', targets)
         environment = Gio.Menu()
         environment.append('検査設定...', 'app.preferences')
-        environment.append('ClamAVの導入・削除...', 'app.package-setup')
+        environment.append('ClamAVの管理...', 'app.package-setup')
         self.menu_model.append_submenu('環境設定', environment)
         box.append(Gtk.PopoverMenuBar.new_from_model(self.menu_model))
         selector = Gtk.Box(spacing=12)
@@ -195,11 +195,13 @@ class Application(Gtk.Application):
         if self.manager:
             self.manager_notice.set_text(text)
 
-    def package_setup(self, manager=None):
+    def package_setup(self, manager=None, updater=None):
         from .packages import AptManager, PACKAGES
         from .notifications import definition_status
         manager = manager or AptManager()
-        window = Gtk.Window(application=self, title='ClamAVの導入・削除', transient_for=self.operation_parent(), modal=True)
+        from .definitions import DefinitionUpdater
+        updater = updater or DefinitionUpdater()
+        window = Gtk.Window(application=self, title='ClamAVの管理', transient_for=self.operation_parent(), modal=True)
         window.set_default_size(720, 580)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                       margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
@@ -215,12 +217,18 @@ class Application(Gtk.Application):
         controls.append(install)
         controls.append(remove)
         box.append(controls)
+        update_controls = Gtk.Box(spacing=8)
+        update = Gtk.Button(label='定義ファイルを取得・更新', hexpand=True)
+        stop_monitor = Gtk.Button(label='監視を終了', sensitive=False)
+        update_controls.append(update)
+        update_controls.append(stop_monitor)
+        box.append(update_controls)
         progress = Gtk.Spinner(halign=Gtk.Align.START)
         box.append(progress)
         message = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.append(message)
         output = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
-        output.update_property([Gtk.AccessibleProperty.LABEL], ['導入・削除の処理結果'])
+        output.update_property([Gtk.AccessibleProperty.LABEL], ['ClamAV管理の処理結果'])
         scroll = Gtk.ScrolledWindow(vexpand=True)
         scroll.set_child(output)
         box.append(scroll)
@@ -229,8 +237,12 @@ class Application(Gtk.Application):
         close = Gtk.Button(label='閉じる')
         close.connect('clicked', lambda _: window.close())
         box.append(close)
-        state = {'running': False, 'closed': False, 'installed': {}}
+        state = {'running': False, 'closed': False, 'installed': {}, 'updating': False, 'cancel': threading.Event()}
         def close_request(_window):
+            if state['updating']:
+                state['cancel'].set()
+                message.set_text('監視を終了しています。更新サービスは停止しません。')
+                return True
             if state['running']:
                 message.set_text('処理中です。完了までお待ちください。OSのパッケージ処理は途中で終了しません。')
                 return True
@@ -241,10 +253,12 @@ class Application(Gtk.Application):
             ready = not state['running'] and not self.busy
             install.set_sensitive(ready and len(state['installed']) < len(PACKAGES))
             remove.set_sensitive(ready and bool(state['installed']))
+            update.set_sensitive(ready and 'clamav-freshclam' in state['installed'])
             refresh.set_sensitive(ready)
         def check_state():
             install.set_sensitive(False)
             remove.set_sensitive(False)
+            update.set_sensitive(False)
             refresh.set_sensitive(False)
             def worker():
                 try:
@@ -271,6 +285,8 @@ class Application(Gtk.Application):
             threading.Thread(target=worker, daemon=True).start()
         def release():
             state['running'] = False
+            state['updating'] = False
+            stop_monitor.set_sensitive(False)
             self.busy = False
             self.set_controls(True)
             progress.stop()
@@ -280,12 +296,14 @@ class Application(Gtk.Application):
             confirmation.destroy()
             message.set_text('管理者認証後に処理します。ダウンロードやパッケージ処理の完了までお待ちください。')
             def worker():
+                install_succeeded = False
                 try:
                     text, code = manager.execute(plan)
                     after = manager.status()
                     expected = len(after) == len(PACKAGES) if plan.action == 'install' else not after
                     if code == 0 and expected:
-                        result = 'インストールが完了しました。' if plan.action == 'install' else 'アンインストールが完了しました。'
+                        install_succeeded = plan.action == 'install'
+                        result = 'インストールが完了しました。「定義ファイルを取得・更新」で更新状態を確認してください。' if plan.action == 'install' else 'アンインストールが完了しました。'
                     else:
                         result = '処理が完了していません。管理者認証と下の詳細・現在の状態を確認してください。'
                 except Exception as error:
@@ -295,6 +313,8 @@ class Application(Gtk.Application):
                     message.set_text(result)
                     release()
                     check_state()
+                    if install_succeeded:
+                        begin_update()
                     return False
                 GLib.idle_add(finished)
             threading.Thread(target=worker, daemon=True).start()
@@ -359,6 +379,47 @@ class Application(Gtk.Application):
                     return False
                 GLib.idle_add(finished)
             threading.Thread(target=worker, daemon=True).start()
+        def begin_update():
+            if self.busy:
+                message.set_text('別の処理が実行中です。完了後に再実行してください。')
+                return
+            dialog = Gtk.MessageDialog(application=self, transient_for=window, modal=True,
+                message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
+                text='定義ファイルを取得・更新しますか？',
+                secondary_text='自動更新サービスを利用して、公式の更新先へ接続します。\n'
+                    '停止中の場合は開始します。稼働中のサービスを止めたり、別のFreshClamを起動したりしません。\n'
+                    '管理者認証が必要な場合があります。取得中の場合はその処理を監視します。')
+            def response(d, answer):
+                d.destroy()
+                if answer != Gtk.ResponseType.OK or self.busy:
+                    return
+                self.busy = True
+                state['running'] = state['updating'] = True
+                state['cancel'].clear()
+                self.set_controls(False)
+                buttons()
+                stop_monitor.set_sensitive(True)
+                progress.start()
+                message.set_text('定義ファイルの取得・更新を確認しています…')
+                def report(text):
+                    GLib.idle_add(output.get_buffer().set_text, text)
+                def worker():
+                    try:
+                        result, text = updater.update(cancel=state['cancel'], progress=report)
+                    except Exception as error:
+                        result, text = '定義の取得・更新を確認できませんでした。', str(error)
+                    def finished():
+                        output.get_buffer().set_text(text)
+                        message.set_text(result)
+                        release()
+                        check_state()
+                        return False
+                    GLib.idle_add(finished)
+                threading.Thread(target=worker, daemon=True).start()
+            dialog.connect('response', response)
+            dialog.present()
+        update.connect('clicked', lambda _: begin_update())
+        stop_monitor.connect('clicked', lambda _: state['cancel'].set())
         install.connect('clicked', lambda _: prepare('install'))
         remove.connect('clicked', lambda _: prepare('remove'))
         refresh.connect('clicked', lambda _: check_state())

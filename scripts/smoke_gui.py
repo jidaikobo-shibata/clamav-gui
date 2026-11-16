@@ -124,14 +124,35 @@ def check():
                 self.installed = False
                 return 'simulated removal only', 0
         backend = FakePackages()
-        app.package_setup(backend)
-        setup = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'ClamAVの導入・削除')
+        class FakeUpdater:
+            executed = 0
+            def update(self, cancel, progress):
+                self.executed += 1
+                progress('simulated definition download')
+                return '定義ファイルの取得・更新を確認しました。', 'simulated definition update only'
+        updater = FakeUpdater()
+        app.package_setup(backend, updater)
+        setup = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'ClamAVの管理')
         setup_widgets = list(descendants(setup))
         remove = next(w for w in setup_widgets if isinstance(w, Gtk.Button) and w.get_label() == 'アンインストール')
-        stage = [0]
+        update = next(w for w in setup_widgets if isinstance(w, Gtk.Button) and w.get_label() == '定義ファイルを取得・更新')
+        stage = [-3]
         def package_check():
             confirmations = [w for w in Gtk.Window.list_toplevels() if w.get_title() == 'ClamAVの変更内容を確認']
-            if stage[0] == 0:
+            if stage[0] == -3:
+                if not update.get_sensitive():
+                    return True
+                update.emit('clicked')
+                dialogs = [w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog)]
+                assert len(dialogs) == 1
+                dialogs[0].response(Gtk.ResponseType.OK)
+                stage[0] = -2
+            elif stage[0] == -2:
+                if app.busy:
+                    return True
+                assert updater.executed == 1
+                stage[0] = 0
+            elif stage[0] == 0:
                 if not remove.get_sensitive():
                     return True
                 remove.emit('clicked')
