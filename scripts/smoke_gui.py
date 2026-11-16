@@ -73,6 +73,8 @@ def check():
     save = next(w for w in editor_widgets if isinstance(w, Gtk.Button) and w.get_label() == '対象設定を保存')
     cancel = next(w for w in editor_widgets if isinstance(w, Gtk.Button) and w.get_label() == 'キャンセル')
     assert save.get_parent() == cancel.get_parent()
+    assert cancel.get_next_sibling() == save
+    assert save.has_css_class('suggested-action')
     editors[0].destroy()
     app.edit_schedule()
     schedules = [w for w in Gtk.Window.list_toplevels() if w.get_title() == 'スケジュール設定']

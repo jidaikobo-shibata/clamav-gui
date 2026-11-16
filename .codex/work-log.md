@@ -33,3 +33,9 @@
 - journalのカーソル以降のログを解析し、必要な定義ファイルの存在も確認。過去成功・HTTP制限・読取不可・監視終了・タイムアウトを区別。
 - 56テストと分離Waylandの模擬処理が成功。実環境ではログ/ファイルの読み取りと解析だけを検証。
 - 未検証：実ダウンロードと管理者認証、初回取得。実機のサービス操作やネット更新は未実施。
+
+## 2026-11-17 対象編集の主要操作を明確化
+
+- GNOME HIGに合わせてキャンセルを左、保存を右へ配置。保存だけにGTK標準suggested-actionを使用。
+- 参考：https://developer.gnome.org/hig/patterns/feedback/dialogs.html および patterns/controls/buttons.html。
+- 分離Waylandでボタン順と強調を検証。既存の検査条件・予定は変更しない。

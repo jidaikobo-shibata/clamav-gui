@@ -714,6 +714,7 @@ class Application(Gtk.Application):
         error_label = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.append(error_label)
         save = Gtk.Button(label='対象設定を保存')
+        save.add_css_class('suggested-action')
         def save_profile(_button):
             try:
                 new = Plan(name.get_text().strip(), [root.get_text()],
@@ -730,10 +731,10 @@ class Application(Gtk.Application):
                 error_label.set_text(str(error))
         save.connect('clicked', save_profile)
         save_actions = Gtk.Box(spacing=8, homogeneous=True)
-        save_actions.append(save)
         cancel = Gtk.Button(label='キャンセル')
         cancel.connect('clicked', lambda _: editor.destroy())
         save_actions.append(cancel)
+        save_actions.append(save)
         box.append(save_actions)
         editor.present()
 
