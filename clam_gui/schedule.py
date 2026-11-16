@@ -1,5 +1,5 @@
 """User systemd timers. Only this application's units are managed."""
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
@@ -19,14 +19,21 @@ class Schedule:
     minute: int = 0
     weekday: int = 0
     monthday: int = 1
+    interval_minutes: int = 5
 
     def calendar(self):
-        if self.frequency not in ('daily', 'weekly', 'monthly'):
+        if self.frequency not in ('daily', 'weekly', 'monthly', 'hourly', 'interval'):
             raise ValueError('実行頻度を確認してください。')
         if not 0 <= self.hour <= 23 or not 0 <= self.minute <= 59:
             raise ValueError('時刻を確認してください。')
         if not 0 <= self.weekday <= 6 or not 1 <= self.monthday <= 28:
             raise ValueError('曜日・日付を確認してください。毎月の日付は1〜28日です。')
+        if type(self.interval_minutes) is not int or not 1 <= self.interval_minutes <= 1440:
+            raise ValueError('間隔は1〜1440分で指定してください。')
+        if self.frequency == 'interval':
+            return None
+        if self.frequency == 'hourly':
+            return f'*-*-* *:{self.minute:02}:00'
         time = f'{self.hour:02}:{self.minute:02}:00'
         if self.frequency == 'weekly':
             return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][self.weekday] + ' *-*-* ' + time
@@ -38,6 +45,10 @@ class Schedule:
         self.calendar()
         if not self.enabled:
             return '定期検査：無効'
+        if self.frequency == 'interval':
+            return f'定期検査：完了から{self.interval_minutes}分後に繰り返し（初回は登録から{self.interval_minutes}分後）'
+        if self.frequency == 'hourly':
+            return f'定期検査：毎時{self.minute:02}分（端末の現地時刻）'
         frequency = {'daily': '毎日', 'weekly': '毎週' + '月火水木金土日'[self.weekday] + '曜日',
                      'monthly': f'毎月{self.monthday}日'}[self.frequency]
         return f'定期検査：{frequency} {self.hour:02}:{self.minute:02}（端末の現地時刻）'
@@ -86,9 +97,14 @@ class Scheduler:
         body = (MARKER + '[Unit]\nDescription=ClamAV GUI scheduled scan\n\n[Service]\n'
                 'Type=oneshot\nExecStart=' + ' '.join(quote(arg) for arg in args) +
                 '\nUMask=0077\nNice=10\nTimeoutStopSec=10\n')
-        timer = (MARKER + '[Unit]\nDescription=ClamAV GUI scan timer\n\n[Timer]\nOnCalendar=' +
-                 schedule.calendar() + '\nPersistent=true\nUnit=' + service.name +
-                 '\n\n[Install]\nWantedBy=timers.target\n')
+        schedule.calendar()
+        if schedule.frequency == 'interval':
+            timing = (f'OnActiveSec={schedule.interval_minutes}min\n'
+                      f'OnUnitInactiveSec={schedule.interval_minutes}min\nAccuracySec=1s\n')
+        else:
+            timing = 'OnCalendar=' + schedule.calendar() + '\nPersistent=true\nAccuracySec=1s\n'
+        timer = (MARKER + '[Unit]\nDescription=ClamAV GUI scan timer\n\n[Timer]\n' +
+                 timing + 'Unit=' + service.name + '\n\n[Install]\nWantedBy=timers.target\n')
         return body, timer
 
     @staticmethod
@@ -162,8 +178,7 @@ class Scheduler:
         old = read_schedule(self.store, key)
         if old.enabled or paths[1].exists():
             # A failed stop must leave the profile intact.
-            self.apply(key, Schedule(False, old.frequency, old.hour, old.minute,
-                                     old.weekday, old.monthday))
+            self.apply(key, replace(old, enabled=False))
         try:
             for path, text in originals.items():
                 if text is not None:

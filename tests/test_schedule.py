@@ -160,3 +160,42 @@ class ProfileActionsTests(unittest.TestCase):
                 raise AssertionError('should not call systemd')
             Scheduler(store, Path(root)/'units', unexpected).remove_profile(key)
             self.assertEqual(store.profiles(), [])
+
+
+class ShortScheduleTests(unittest.TestCase):
+    def test_hourly_calendar_and_interval_description(self):
+        hourly = Schedule(True, 'hourly', minute=17)
+        self.assertEqual(hourly.calendar(), '*-*-* *:17:00')
+        self.assertIn('毎時17分', hourly.describe())
+        interval = Schedule(True, 'interval', interval_minutes=7)
+        self.assertIsNone(interval.calendar())
+        self.assertIn('完了から7分後', interval.describe())
+        for value in (0, 1441, True, 1.5):
+            with self.assertRaises(ValueError):
+                Schedule(True, 'interval', interval_minutes=value).calendar()
+
+    def test_interval_timer_and_compatibility(self):
+        from clam_gui.schedule import save_schedule
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root)/'data')
+            key = store.save_profile(Plan('test', [root], []))
+            manager = Scheduler(store, Path(root)/'units', lambda *_: None)
+            interval = Schedule(True, 'interval', interval_minutes=7)
+            manager.apply(key, interval)
+            text = manager.paths(key)[1].read_text()
+            self.assertIn('OnActiveSec=7min', text)
+            self.assertIn('OnUnitInactiveSec=7min', text)
+            self.assertNotIn('OnCalendar=', text)
+            self.assertNotIn('Persistent=', text)
+            self.assertEqual(read_schedule(store, key), interval)
+            manager.remove_profile(key)
+            self.assertNotIn(key, dict(store.profiles()))
+            old = Schedule(**{'enabled': True, 'frequency': 'daily', 'hour': 2, 'minute': 0,
+                              'weekday': 0, 'monthday': 1})
+            self.assertEqual(old.calendar(), '*-*-* 02:00:00')
+            self.assertEqual(old.interval_minutes, 5)
+
+    def test_hourly_calendar_is_accepted_by_systemd(self):
+        result = subprocess.run(['systemd-analyze', 'calendar', Schedule(True, 'hourly', minute=17).calendar()],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)

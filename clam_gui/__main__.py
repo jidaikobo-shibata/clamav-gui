@@ -762,8 +762,8 @@ class Application(Gtk.Application):
             row.append(widget)
             box.append(row)
             return widget
-        frequency = field('頻度', Gtk.DropDown.new_from_strings(['毎日', '毎週', '毎月']))
-        frequency.set_selected(['daily', 'weekly', 'monthly'].index(saved.frequency))
+        frequency = field('頻度', Gtk.DropDown.new_from_strings(['毎日', '毎週', '毎月', '毎時', '一定間隔（n分）']))
+        frequency.set_selected(['daily', 'weekly', 'monthly', 'hourly', 'interval'].index(saved.frequency))
         hour = field('時（0〜23）', Gtk.SpinButton.new_with_range(0, 23, 1))
         hour.set_value(saved.hour)
         minute = field('分（0〜59）', Gtk.SpinButton.new_with_range(0, 59, 1))
@@ -772,22 +772,35 @@ class Application(Gtk.Application):
         weekday.set_selected(saved.weekday)
         monthday = field('日付（毎月1〜28日）', Gtk.SpinButton.new_with_range(1, 28, 1))
         monthday.set_value(saved.monthday)
+        interval = field('間隔（1〜1440分）', Gtk.SpinButton.new_with_range(1, 1440, 1))
+        interval.set_value(saved.interval_minutes)
+        hint = Gtk.Label(xalign=0, wrap=True)
+        box.append(hint)
         def frequency_changed(*_):
-            weekday.set_sensitive(frequency.get_selected() == 1)
-            monthday.set_sensitive(frequency.get_selected() == 2)
+            index = frequency.get_selected()
+            hour.get_parent().set_visible(index in (0, 1, 2))
+            minute.get_parent().set_visible(index != 4)
+            weekday.get_parent().set_visible(index == 1)
+            monthday.get_parent().set_visible(index == 2)
+            interval.get_parent().set_visible(index == 4)
+            if index == 4:
+                text = ('初回は登録から指定分後、その後は検査の完了から指定分後に繰り返します。\n'
+                        '画面を閉じても動きます。ログアウト中の分をまとめて実行しません。\n'
+                        '短い間隔の試験には、小さなテスト用フォルダーを使ってください。')
+            else:
+                text = ('端末の現地時刻で実行します。画面を閉じても動きます。\n'
+                        'ログイン後に逃した予定を1回実行します。電源オフ中は動きません。')
+            hint.set_text(text + '\n既存cronと同じ対象の予定を重複させないでください。')
         frequency.connect('notify::selected', frequency_changed)
         frequency_changed()
-        box.append(Gtk.Label(label='端末の現地時刻で実行します。画面を閉じても動きます。\n'
-            'ログイン後に逃した予定を1回実行します。電源オフ中は動きません。\n'
-            '既存cronは残るため、同じ対象の予定を重複させないでください。', xalign=0, wrap=True))
         message = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.append(message)
         apply = Gtk.Button(label='登録内容を確認')
         box.append(apply)
         def prepare(_button):
-            schedule = Schedule(enabled.get_active(), ['daily', 'weekly', 'monthly'][frequency.get_selected()],
+            schedule = Schedule(enabled.get_active(), ['daily', 'weekly', 'monthly', 'hourly', 'interval'][frequency.get_selected()],
                                 hour.get_value_as_int(), minute.get_value_as_int(),
-                                weekday.get_selected(), monthday.get_value_as_int())
+                                weekday.get_selected(), monthday.get_value_as_int(), interval.get_value_as_int())
             manager = Scheduler(self.store)
             try:
                 schedule.calendar()

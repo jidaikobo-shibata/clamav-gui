@@ -39,3 +39,11 @@
 - GNOME HIGに合わせてキャンセルを左、保存を右へ配置。保存だけにGTK標準suggested-actionを使用。
 - 参考：https://developer.gnome.org/hig/patterns/feedback/dialogs.html および patterns/controls/buttons.html。
 - 分離Waylandでボタン順と強調を検証。既存の検査条件・予定は変更しない。
+
+## 2026-11-17 毎時・n分間隔の定期検査
+
+- 毎時の指定分と1〜1440分の間隔設定を追加。間隔は初回登録後、以後は前回完了後から数える。
+- Calendar方式とmonotonic方式を分離。間隔ではPersistentを使わず、検査自身の重複や復帰時の大量実行を避ける。
+- 頻度に必要な入力欄だけ表示。古い予定は既定値で読み込み、削除/無効化で間隔値を失わないようにした。
+- 59テスト、systemdのカレンダー形式確認、分離Waylandで頻度と欄の切替を確認。実予定の登録・発火は未実施。
+- 次は小さな対象で短周期の実運用試験を行う。

@@ -79,6 +79,15 @@ def check():
     app.edit_schedule()
     schedules = [w for w in Gtk.Window.list_toplevels() if w.get_title() == 'スケジュール設定']
     assert len(schedules) == 1
+    schedule_widgets = list(descendants(schedules[0]))
+    frequency = next(w for w in schedule_widgets if isinstance(w, Gtk.DropDown) and w.get_model().get_n_items() == 5)
+    frequency.set_selected(4)
+    interval = next(w for w in schedule_widgets if isinstance(w, Gtk.SpinButton) and w.get_adjustment().get_upper() == 1440)
+    assert interval.get_parent().get_visible()
+    interval.set_value(7)
+    frequency.set_selected(3)
+    assert not interval.get_parent().get_visible()
+    frequency.set_selected(0)
     schedules[0].destroy()
     app.close_manager()
     app.preferences()
