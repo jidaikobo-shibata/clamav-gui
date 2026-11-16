@@ -59,3 +59,17 @@ macOS・Windowsではまだ動作確認していません。Linux向けの依存
 GUIのコードはWTFPL version 2です。[LICENSE](LICENSE)を参照してください。
 ClamAV、GTK等はそれぞれのプロジェクトのライセンスに従います。
 ClamAV本体・定義ファイル・第三者のライブラリはこのリポジトリへ同梱しません。
+
+## アプリ一覧から起動する（Ubuntu）
+
+開発用チェックアウトをアプリ一覧へ登録できます。
+
+```bash
+/usr/bin/python3 scripts/install_launcher.py
+```
+
+登録後はアプリ一覧で「ClamAV GUI」を検索してください。Terminalは開きません。
+ユーザー用Desktop Entryを作成し、同梱のSVGアイコンを使用します。
+既存の同名ランチャーは上書きせず停止します。自動起動の設定は追加しません。
+チェックアウトを移動すると起動できなくなるため、登録し直してください。
+事前確認だけを行う場合は`--preview`を指定します。
