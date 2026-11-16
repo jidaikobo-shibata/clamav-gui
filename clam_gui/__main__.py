@@ -39,6 +39,7 @@ class Application(Gtk.Application):
         self.duplicate_action = action('duplicate-target', self.duplicate_selected)
         self.delete_action = action('delete-target', self.delete_selected)
         action('preferences', self.preferences)
+        action('package-setup', self.package_setup)
         self.menu_model = Gio.Menu()
         targets = Gio.Menu()
         targets.append('対象を追加...', 'app.new-target')
@@ -46,6 +47,7 @@ class Application(Gtk.Application):
         self.menu_model.append_submenu('対象管理', targets)
         environment = Gio.Menu()
         environment.append('検査設定...', 'app.preferences')
+        environment.append('ClamAVの導入・削除...', 'app.package-setup')
         self.menu_model.append_submenu('環境設定', environment)
         box.append(Gtk.PopoverMenuBar.new_from_model(self.menu_model))
         selector = Gtk.Box(spacing=12)
@@ -192,6 +194,176 @@ class Application(Gtk.Application):
         self.notice.set_text(text)
         if self.manager:
             self.manager_notice.set_text(text)
+
+    def package_setup(self, manager=None):
+        from .packages import AptManager, PACKAGES
+        from .notifications import definition_status
+        manager = manager or AptManager()
+        window = Gtk.Window(application=self, title='ClamAVの導入・削除', transient_for=self.operation_parent(), modal=True)
+        window.set_default_size(720, 580)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                      margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
+        window.set_child(box)
+        status = Gtk.Label(label='導入状態を確認しています…', xalign=0, wrap=True, selectable=True)
+        box.append(status)
+        box.append(Gtk.Label(label='ClamAVは、このGUI以外のアプリも利用する共通のソフトウェアです。\n'
+            '削除するとThunderbird連携などの検査も使えなくなります。', xalign=0, wrap=True))
+        controls = Gtk.Box(spacing=8, homogeneous=True)
+        install = Gtk.Button(label='インストール')
+        remove = Gtk.Button(label='アンインストール')
+        remove.add_css_class('destructive-action')
+        controls.append(install)
+        controls.append(remove)
+        box.append(controls)
+        progress = Gtk.Spinner(halign=Gtk.Align.START)
+        box.append(progress)
+        message = Gtk.Label(xalign=0, wrap=True, selectable=True)
+        box.append(message)
+        output = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        output.update_property([Gtk.AccessibleProperty.LABEL], ['導入・削除の処理結果'])
+        scroll = Gtk.ScrolledWindow(vexpand=True)
+        scroll.set_child(output)
+        box.append(scroll)
+        refresh = Gtk.Button(label='状態を再確認')
+        box.append(refresh)
+        close = Gtk.Button(label='閉じる')
+        close.connect('clicked', lambda _: window.close())
+        box.append(close)
+        state = {'running': False, 'closed': False, 'installed': {}}
+        def close_request(_window):
+            if state['running']:
+                message.set_text('処理中です。完了までお待ちください。OSのパッケージ処理は途中で終了しません。')
+                return True
+            state['closed'] = True
+            return False
+        window.connect('close-request', close_request)
+        def buttons():
+            ready = not state['running'] and not self.busy
+            install.set_sensitive(ready and len(state['installed']) < len(PACKAGES))
+            remove.set_sensitive(ready and bool(state['installed']))
+            refresh.set_sensitive(ready)
+        def check_state():
+            install.set_sensitive(False)
+            remove.set_sensitive(False)
+            refresh.set_sensitive(False)
+            def worker():
+                try:
+                    installed = manager.status()
+                    lines = [package + ': ' + installed.get(package, '未導入') for package in PACKAGES]
+                    text = '\n'.join(lines) + '\n\n' + definition_status()
+                    if len(installed) == len(PACKAGES):
+                        text += '\n初回導入後は、定義ファイルの更新が終わってから検査してください。'
+                    error = None
+                except Exception as exception:
+                    installed, text, error = {}, str(exception), exception
+                def finished():
+                    if state['closed']:
+                        return False
+                    state['installed'] = installed
+                    status.set_text(text)
+                    if error is None:
+                        buttons()
+                    else:
+                        message.set_text('この環境では導入・削除を実行できません。')
+                        refresh.set_sensitive(True)
+                    return False
+                GLib.idle_add(finished)
+            threading.Thread(target=worker, daemon=True).start()
+        def release():
+            state['running'] = False
+            self.busy = False
+            self.set_controls(True)
+            progress.stop()
+            close.set_sensitive(True)
+            buttons()
+        def execute(plan, confirmation):
+            confirmation.destroy()
+            message.set_text('管理者認証後に処理します。ダウンロードやパッケージ処理の完了までお待ちください。')
+            def worker():
+                try:
+                    text, code = manager.execute(plan)
+                    after = manager.status()
+                    expected = len(after) == len(PACKAGES) if plan.action == 'install' else not after
+                    if code == 0 and expected:
+                        result = 'インストールが完了しました。' if plan.action == 'install' else 'アンインストールが完了しました。'
+                    else:
+                        result = '処理が完了していません。管理者認証と下の詳細・現在の状態を確認してください。'
+                except Exception as error:
+                    text, result = str(error), '処理を完了できませんでした。下の詳細を確認してください。'
+                def finished():
+                    output.get_buffer().set_text(text)
+                    message.set_text(result)
+                    release()
+                    check_state()
+                    return False
+                GLib.idle_add(finished)
+            threading.Thread(target=worker, daemon=True).start()
+        def confirm(plan):
+            confirmation = Gtk.Window(application=self, title='ClamAVの変更内容を確認', transient_for=window, modal=True)
+            confirmation.set_default_size(700, 550)
+            area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
+            confirmation.set_child(area)
+            detail = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+            detail.update_property([Gtk.AccessibleProperty.LABEL], ['変更対象と影響'])
+            detail.get_buffer().set_text(plan.describe())
+            scroll = Gtk.ScrolledWindow(vexpand=True)
+            scroll.set_child(detail)
+            area.append(scroll)
+            agreed = Gtk.CheckButton(label='変更対象と、他のアプリへの影響を確認しました')
+            area.append(agreed)
+            actions = Gtk.Box(spacing=8, homogeneous=True)
+            cancel = Gtk.Button(label='キャンセル')
+            run = Gtk.Button(label='管理者認証して実行', sensitive=False)
+            agreed.connect('toggled', lambda check: run.set_sensitive(check.get_active()))
+            actions.append(cancel)
+            actions.append(run)
+            area.append(actions)
+            def cancelled(*_):
+                release()
+                message.set_text('変更をキャンセルしました。')
+                confirmation.destroy()
+                return True
+            cancel.connect('clicked', cancelled)
+            confirmation.connect('close-request', cancelled)
+            run.connect('clicked', lambda _: execute(plan, confirmation))
+            confirmation.present()
+        def prepare(action):
+            if self.busy:
+                message.set_text('別の処理が実行中です。完了後に再実行してください。')
+                return
+            self.busy = True
+            state['running'] = True
+            self.set_controls(False)
+            buttons()
+            close.set_sensitive(False)
+            progress.start()
+            message.set_text('変更予定を確認しています。まだインストール・削除は実行していません。')
+            def worker():
+                try:
+                    plan, error = manager.preview(action), None
+                except Exception as exception:
+                    plan, error = None, str(exception)
+                def finished():
+                    if error is not None:
+                        output.get_buffer().set_text(error)
+                        message.set_text('変更予定を確認できませんでした。')
+                        release()
+                    elif not plan.changes:
+                        message.set_text('変更は不要です。')
+                        release()
+                        check_state()
+                    else:
+                        progress.stop()
+                        confirm(plan)
+                    return False
+                GLib.idle_add(finished)
+            threading.Thread(target=worker, daemon=True).start()
+        install.connect('clicked', lambda _: prepare('install'))
+        remove.connect('clicked', lambda _: prepare('remove'))
+        refresh.connect('clicked', lambda _: check_state())
+        window.present()
+        check_state()
 
     def preferences(self):
         window = Gtk.Window(application=self, title='環境設定', transient_for=self.operation_parent(), modal=True)

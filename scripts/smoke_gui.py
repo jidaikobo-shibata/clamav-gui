@@ -111,7 +111,58 @@ def check():
         assert app.store.scan_limits()['max-filesize'] == 256
         assert app.store.scan_options()['phishing-sigs']
         preferences[0].destroy()
-        app.quit()
+        from clam_gui.packages import PackagePlan, PACKAGES
+        class FakePackages:
+            installed = True
+            executed = 0
+            def status(self):
+                return {name: 'test' for name in PACKAGES} if self.installed else {}
+            def preview(self, action):
+                return PackagePlan(action, ('Remv clamav [test]',), 'Remv clamav [test]')
+            def execute(self, plan):
+                self.executed += 1
+                self.installed = False
+                return 'simulated removal only', 0
+        backend = FakePackages()
+        app.package_setup(backend)
+        setup = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'ClamAVの導入・削除')
+        setup_widgets = list(descendants(setup))
+        remove = next(w for w in setup_widgets if isinstance(w, Gtk.Button) and w.get_label() == 'アンインストール')
+        stage = [0]
+        def package_check():
+            confirmations = [w for w in Gtk.Window.list_toplevels() if w.get_title() == 'ClamAVの変更内容を確認']
+            if stage[0] == 0:
+                if not remove.get_sensitive():
+                    return True
+                remove.emit('clicked')
+                stage[0] = 1
+            elif stage[0] == 1 and confirmations:
+                dialog = confirmations[0]
+                children = list(descendants(dialog))
+                run = next(w for w in children if isinstance(w, Gtk.Button) and w.get_label() == '管理者認証して実行')
+                assert not run.get_sensitive()
+                cancel = next(w for w in children if isinstance(w, Gtk.Button) and w.get_label() == 'キャンセル')
+                cancel.emit('clicked')
+                assert backend.executed == 0
+                assert not app.busy
+                remove.emit('clicked')
+                stage[0] = 2
+            elif stage[0] == 2 and confirmations:
+                children = list(descendants(confirmations[0]))
+                ack = next(w for w in children if isinstance(w, Gtk.CheckButton))
+                ack.set_active(True)
+                run = next(w for w in children if isinstance(w, Gtk.Button) and w.get_label() == '管理者認証して実行')
+                assert run.get_sensitive()
+                run.emit('clicked')
+                stage[0] = 3
+            elif stage[0] == 3 and not app.busy:
+                assert backend.executed == 1
+                assert not backend.installed
+                setup.close()
+                app.quit()
+                return False
+            return True
+        GLib.timeout_add(100, package_check)
         return False
     GLib.timeout_add(100, finish_preferences)
     return False
