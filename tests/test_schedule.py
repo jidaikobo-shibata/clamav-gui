@@ -1,0 +1,162 @@
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from clam_gui.core import Plan, Store
+from clam_gui.schedule import Schedule, Scheduler, read_schedule
+
+
+class ScheduleTests(unittest.TestCase):
+    def test_calendars_and_validation(self):
+        self.assertEqual(Schedule(True, 'daily', 9, 5).calendar(), '*-*-* 09:05:00')
+        self.assertEqual(Schedule(True, 'weekly', 9, 5, 6).calendar(), 'Sun *-*-* 09:05:00')
+        self.assertEqual(Schedule(True, 'monthly', 9, 5, 0, 28).calendar(), '*-*-28 09:05:00')
+        for schedule in [Schedule(hour=24), Schedule(minute=60), Schedule(weekday=7),
+                         Schedule(monthday=29), Schedule(frequency='bad')]:
+            with self.assertRaises(ValueError):
+                schedule.calendar()
+
+    def test_apply_disable_and_safe_units(self):
+        with tempfile.TemporaryDirectory(prefix='clam schedule ') as root:
+            store = Store(Path(root)/'data')
+            key = store.save_profile(Plan('test', [root], []))
+            calls = []
+            manager = Scheduler(store, Path(root)/'units', lambda *args: calls.append(args))
+            schedule = Schedule(True, 'weekly', 12, 30, 1)
+            manager.apply(key, schedule)
+            service, timer = manager.paths(key)
+            self.assertIn('OnCalendar=Tue *-*-* 12:30:00', timer.read_text())
+            self.assertIn('Persistent=true', timer.read_text())
+            self.assertIn('"--data-dir" "' + str(store.path.parent) + '"', service.read_text())
+            self.assertIn(('enable', '--now', timer.name), calls)
+            self.assertEqual(read_schedule(store, key), schedule)
+            manager.apply(key, Schedule())
+            self.assertIn(('disable', '--now', timer.name), calls)
+            self.assertFalse(read_schedule(store, key).enabled)
+
+    def test_failure_restores_files_and_saved_schedule(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root)/'data')
+            key = store.save_profile(Plan('test', [root], []))
+            manager = Scheduler(store, Path(root)/'units', lambda *args: None)
+            old = Schedule(True, hour=8)
+            manager.apply(key, old)
+            paths = manager.paths(key)
+            content = [p.read_text() for p in paths]
+            def fail(*args):
+                if args[0] == 'restart':
+                    raise RuntimeError('failure')
+            manager.run = fail
+            with self.assertRaises(RuntimeError):
+                manager.apply(key, Schedule(True, hour=9))
+            self.assertEqual(read_schedule(store, key), old)
+            self.assertEqual([p.read_text() for p in paths], content)
+
+    def test_unowned_unit_and_root_are_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root)/'data')
+            key = store.save_profile(Plan('test', [root], []))
+            calls = []
+            manager = Scheduler(store, Path(root), lambda *args: calls.append(args))
+            manager.paths(key)[0].write_text('human-owned')
+            with self.assertRaises(ValueError):
+                manager.apply(key, Schedule(True))
+            self.assertEqual(calls, [])
+            self.assertEqual(manager.paths(key)[0].read_text(), 'human-owned')
+            admin = store.save_profile(Plan('system', ['/'], [], False, [], True))
+            with self.assertRaises(ValueError):
+                manager.apply(admin, Schedule(True))
+
+    def test_systemd_accepts_calendar(self):
+        for schedule in [Schedule(True), Schedule(True, 'weekly'), Schedule(True, 'monthly')]:
+            result = subprocess.run(['systemd-analyze', 'calendar', schedule.calendar()],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class ScheduledRunnerTests(unittest.TestCase):
+    def test_disabled_schedule_never_scans(self):
+        from scripts.run_scheduled import main
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            key = store.save_profile(Plan('test', [root], []))
+            with patch('sys.argv', ['runner', '--data-dir', root, '--profile', key]), \
+                 patch('scripts.run_scheduled.scan') as scanner:
+                self.assertEqual(main(), 0)
+                scanner.assert_not_called()
+
+    def test_preflight_failure_is_saved_and_notified(self):
+        from scripts.run_scheduled import main
+        from clam_gui.schedule import save_schedule
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            key = store.save_profile(Plan('test', [root], []))
+            save_schedule(store, key, Schedule(True))
+            with patch('sys.argv', ['runner', '--data-dir', root, '--profile', key]), \
+                 patch('scripts.run_scheduled.scan', side_effect=ValueError('別の検査が実行中です')), \
+                 patch('scripts.run_scheduled.subprocess.run') as notify:
+                self.assertEqual(main(), 2)
+                notify.assert_called_once()
+                self.assertIn('--expire-time=0', notify.call_args.args[0])
+                self.assertIn('--urgency=critical', notify.call_args.args[0])
+            self.assertIn('別の検査', store.recent()[0][2])
+
+
+class ProfileActionsTests(unittest.TestCase):
+    def test_duplicate_copies_conditions_and_disabled_schedule(self):
+        from clam_gui.schedule import save_schedule
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            key = store.save_profile(Plan('資料', [root], [root+'/file'], False, [root+'/cache']))
+            schedule = Schedule(True, 'weekly', 15, 30, 2)
+            save_schedule(store, key, schedule)
+            copy = store.duplicate_profile(key)
+            second = store.duplicate_profile(key)
+            rows = dict(store.profiles())
+            self.assertEqual(rows[copy].targets, rows[key].targets)
+            self.assertEqual(rows[copy].excludes, rows[key].excludes)
+            self.assertEqual(rows[copy].excluded_dirs, rows[key].excluded_dirs)
+            self.assertFalse(rows[copy].phishing)
+            self.assertNotEqual(rows[copy].label, rows[second].label)
+            self.assertFalse(read_schedule(store, copy).enabled)
+            self.assertEqual(read_schedule(store, copy).weekday, 2)
+            self.assertTrue(read_schedule(store, key).enabled)
+
+    def test_delete_removes_units_and_preserves_history(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root)/'data')
+            home_key = store.save_profile(Plan('home', [root], []))
+            store.save('date', 'target', 'status', 'output')
+            manager = Scheduler(store, Path(root)/'units', lambda *args: None)
+            manager.apply(home_key, Schedule(True))
+            paths = manager.paths(home_key)
+            manager.remove_profile(home_key)
+            self.assertFalse(any(p.exists() for p in paths))
+            self.assertNotIn(home_key, dict(store.profiles()))
+            self.assertEqual(len(store.recent()), 1)
+            self.assertFalse(read_schedule(store, home_key).enabled)
+
+    def test_stop_failure_preserves_profile(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root)/'data')
+            key = store.save_profile(Plan('test', [root], []))
+            manager = Scheduler(store, Path(root)/'units', lambda *args: None)
+            manager.apply(key, Schedule(True))
+            def failure(*args):
+                if args[0] == 'disable':
+                    raise RuntimeError('stop failed')
+            manager.run = failure
+            with self.assertRaises(RuntimeError):
+                manager.remove_profile(key)
+            self.assertIn(key, dict(store.profiles()))
+
+    def test_delete_unscheduled_profile_needs_no_systemd(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            key = store.save_profile(Plan('test', [root], []))
+            def unexpected(*args):
+                raise AssertionError('should not call systemd')
+            Scheduler(store, Path(root)/'units', unexpected).remove_profile(key)
+            self.assertEqual(store.profiles(), [])
