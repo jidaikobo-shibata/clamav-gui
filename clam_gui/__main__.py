@@ -28,6 +28,8 @@ class Application(Gtk.Application):
         self.auto_status = None
         self.auto_checking = False
         self.auto_checked_at = None
+        self.install_prompt_checked = False
+        self.install_prompt = None
 
     def do_activate(self):
         if self.get_active_window():
@@ -132,6 +134,33 @@ class Application(Gtk.Application):
         self.refresh_profiles()
         self.state_timer = GLib.timeout_add_seconds(1, self.poll_plans)
         window.present()
+        GLib.idle_add(self.offer_install)
+
+    def offer_install(self):
+        if self.install_prompt_checked:
+            return False
+        self.install_prompt_checked = True
+        if shutil.which('clamscan'):
+            return False
+        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True,
+            message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.NONE,
+            text='ClamAVが見つかりません',
+            secondary_text='検査を行うには、ClamAV本体のインストールが必要です。\n'
+                '次の画面で変更内容を確認し、必要なOSの管理者認証を経てインストールできます。\n'
+                '「あとで」を選んでも、保存済みのログや設定は確認できます。')
+        dialog.add_button('あとで', Gtk.ResponseType.CANCEL)
+        install = dialog.add_button('インストールへ進む', Gtk.ResponseType.ACCEPT)
+        install.add_css_class('suggested-action')
+        dialog.set_default_response(Gtk.ResponseType.ACCEPT)
+        self.install_prompt = dialog
+        def response(window, answer):
+            window.destroy()
+            self.install_prompt = None
+            if answer == Gtk.ResponseType.ACCEPT:
+                self.package_setup()
+        dialog.connect('response', response)
+        dialog.present()
+        return False
 
     def build_plan_sidebar(self):
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,

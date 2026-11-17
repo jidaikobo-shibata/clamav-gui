@@ -24,8 +24,32 @@ from clam_gui.definitions import AutoUpdateState
 auto_patch = patch('clam_gui.__main__.AutoUpdateService')
 auto_service = auto_patch.start()
 auto_service.return_value.status.return_value = AutoUpdateState(True, True, True, 24)
+from clam_gui.options import DEFAULTS, LIMITS
+# Keep the GUI test independent of whether the real ClamAV package is installed.
+patch('clam_gui.__main__.shutil.which', return_value='/mock/clamscan').start()
+patch('clam_gui.__main__.supported_options', return_value=set(DEFAULTS) | set(LIMITS)).start()
+standard = dict(DEFAULTS, **{'phishing-sigs': True, 'phishing-scan-urls': True, 'alert-encrypted': False})
+patch('clam_gui.__main__.standard_defaults', return_value=standard).start()
+patch('clam_gui.__main__.engine_status', return_value='ClamAV test engine').start()
 app = Application()
 def check():
+    assert app.install_prompt_checked and app.install_prompt is None
+    with patch('clam_gui.__main__.shutil.which', return_value=None), patch.object(app, 'package_setup') as setup:
+        app.install_prompt_checked = False
+        app.offer_install()
+        assert app.install_prompt.get_modal()
+        assert app.install_prompt.get_transient_for() == app.window
+        setup.assert_not_called()
+        app.install_prompt.response(Gtk.ResponseType.CANCEL)
+        assert app.install_prompt is None
+        app.offer_install()
+        assert app.install_prompt is None
+        setup.assert_not_called()
+        app.install_prompt_checked = False
+        app.offer_install()
+        app.install_prompt.response(Gtk.ResponseType.ACCEPT)
+        setup.assert_called_once_with()
+
     assert app.menu_model.get_n_items() == 3
     menu = app.menu_model.get_item_link(0, Gio.MENU_LINK_SECTION)
     assert menu.get_n_items() == 1
@@ -52,7 +76,6 @@ def check():
     assert app.about_window.get_program_name() == 'ClamAV GUI'
     app.about_window.close()
     assert app.about_window is None
-    from unittest.mock import patch
     with patch.object(app, 'quit') as quit_mock, patch.object(app, 'show_notice') as notice:
         app.busy = True
         app.activate_action('quit', None)
