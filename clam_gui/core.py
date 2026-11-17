@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+from .runtime import track_scan
 from .mailboxes import MAILBOX_NOTE, mailbox_findings, mailbox_guidance
 from .options import DEFAULTS, supported_options, option_arguments, describe_options, LIMITS, validate_limits, limit_arguments, describe_limits
 
@@ -50,6 +51,9 @@ class Store:
                        '(id TEXT PRIMARY KEY, name TEXT NOT NULL, data TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS schedules '
                        '(profile_id TEXT PRIMARY KEY, data TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS scan_runs '
+                       '(token TEXT PRIMARY KEY, profile_id TEXT NOT NULL, pid INTEGER NOT NULL, '
+                       'identity TEXT, started TEXT NOT NULL, cancel_requested INTEGER NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS preferences '
                        '(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
         self.path.chmod(0o600)
@@ -165,7 +169,7 @@ class Store:
         with self.connect() as db:
             row = db.execute('SELECT name, data FROM profiles WHERE id=?', (key,)).fetchone()
             if row is None:
-                raise ValueError('対象設定が見つかりません。')
+                raise ValueError('検査プランが見つかりません。')
             validate_profile(Plan(row[0], **json.loads(row[1])))
             names = {item[0] for item in db.execute('SELECT name FROM profiles')}
             name = row[0] + '（複製）'
@@ -259,7 +263,7 @@ class Plan:
 
 def validate_profile(plan):
     if not plan.label.strip():
-        raise ValueError('対象設定の名前を入力してください。')
+        raise ValueError('検査プランの名前を入力してください。')
     if len(plan.targets) != 1 or not Path(plan.targets[0]).is_absolute():
         raise ValueError('基本の対象はフォルダー1つを絶対パスで指定してください。')
     root = Path(os.path.normpath(plan.targets[0]))
@@ -332,50 +336,51 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError('別の検査が実行中です。完了後に再実行してください。') from None
-        command = [binary, '--recursive', '--suppress-ok-results',
-                   '--heuristic-alerts=yes', '--alert-exceeds-max=yes',
-                   '--fail-if-cvd-older-than=3']
-        command += arguments
-        command += ['--exclude=^' + re.escape(str(p)) + '$' for p in plan.excludes]
-        command += ['--exclude-dir=^' + re.escape(os.path.normpath(str(p))) + r'(/|$)'
-                    for p in plan.excluded_dirs]
-        command += ['--'] + [str(p) for p in plan.targets]
-        # A temporary file avoids pipe deadlocks and unbounded in-memory output.
-        with tempfile.TemporaryFile() as log:
-            try:
-                process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
-                                           env={**os.environ, 'LC_ALL': 'C'})
-                cancelled = False
-                while True:
-                    try:
-                        code = process.wait(timeout=0.2)
-                        break
-                    except subprocess.TimeoutExpired:
-                        if cancel.is_set():
-                            cancelled = True
-                            process.terminate()
-                            try:
-                                code = process.wait(timeout=3)
-                            except subprocess.TimeoutExpired:
-                                process.kill()
-                                code = process.wait()
+        with track_scan(store, profile_id, started) as running:
+            command = [binary, '--recursive', '--suppress-ok-results',
+                       '--heuristic-alerts=yes', '--alert-exceeds-max=yes',
+                       '--fail-if-cvd-older-than=3']
+            command += arguments
+            command += ['--exclude=^' + re.escape(str(p)) + '$' for p in plan.excludes]
+            command += ['--exclude-dir=^' + re.escape(os.path.normpath(str(p))) + r'(/|$)'
+                        for p in plan.excluded_dirs]
+            command += ['--'] + [str(p) for p in plan.targets]
+            # A temporary file avoids pipe deadlocks and unbounded in-memory output.
+            with tempfile.TemporaryFile() as log:
+                try:
+                    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                               env={**os.environ, 'LC_ALL': 'C'})
+                    cancelled = False
+                    while True:
+                        try:
+                            code = process.wait(timeout=0.2)
                             break
-                size = log.seek(0, 2)
-                log.seek(max(0, size - 2 * 1024 * 1024))
-                output = log.read().decode('utf-8', errors='replace')
-                if size > 2 * 1024 * 1024:
-                    output = 'WARNING: 出力が大きいため末尾2 MiBのみ保存しています。\n' + output
-                status = summarize(code, output, cancelled)
-            except OSError as error:
-                status, output = '検査不完了：ClamAVを実行できませんでした', str(error)
-    findings = mailbox_findings(output, plan.targets)
-    if findings:
-        status += f'\n{MAILBOX_NOTE}（検出された保存ファイル：{len(findings)}件）'
-        status += '\n複数のメールをまとめて保存できる形式です。'
-        status += '\n保存ファイル自体は削除せず、メールアプリで確認してください。'
-        output += '\n\n' + mailbox_guidance(findings)
-    output += '\n\n--- この検査で使用した設定 ---\n' + describe_options(settings, supported)
-    output += '\n' + describe_limits(limits)
-    output += '\n検査上限の警告・ヒューリスティック警告: 有効（固定）\n'
-    store.save(started, plan.describe(), status, output, profile_id)
-    return status, output
+                        except subprocess.TimeoutExpired:
+                            if cancel.is_set() or running.cancelled():
+                                cancelled = True
+                                process.terminate()
+                                try:
+                                    code = process.wait(timeout=3)
+                                except subprocess.TimeoutExpired:
+                                    process.kill()
+                                    code = process.wait()
+                                break
+                    size = log.seek(0, 2)
+                    log.seek(max(0, size - 2 * 1024 * 1024))
+                    output = log.read().decode('utf-8', errors='replace')
+                    if size > 2 * 1024 * 1024:
+                        output = 'WARNING: 出力が大きいため末尾2 MiBのみ保存しています。\n' + output
+                    status = summarize(code, output, cancelled)
+                except OSError as error:
+                    status, output = '検査不完了：ClamAVを実行できませんでした', str(error)
+            findings = mailbox_findings(output, plan.targets)
+            if findings:
+                status += f'\n{MAILBOX_NOTE}（検出された保存ファイル：{len(findings)}件）'
+                status += '\n複数のメールをまとめて保存できる形式です。'
+                status += '\n保存ファイル自体は削除せず、メールアプリで確認してください。'
+                output += '\n\n' + mailbox_guidance(findings)
+            output += '\n\n--- この検査で使用した設定 ---\n' + describe_options(settings, supported)
+            output += '\n' + describe_limits(limits)
+            output += '\n検査上限の警告・ヒューリスティック警告: 有効（固定）\n'
+            store.save(started, plan.describe(), status, output, profile_id)
+            return status, output

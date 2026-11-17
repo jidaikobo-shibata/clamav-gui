@@ -34,10 +34,10 @@ def scan_notification(label, status, output, started, finished, definitions):
     hours, rest = divmod(seconds, 3600)
     minutes, seconds = divmod(rest, 60)
     versions = re.findall(r'^Engine version:\s*(.+)$', output, re.M)
-    body = (f'対象：{label}\n{status}\n完了：{finished:%Y/%m/%d %H:%M:%S}\n'
+    body = (f'検査プラン：{label}\n{status}\n完了：{finished:%Y/%m/%d %H:%M:%S}\n'
             f'検査ファイル数：{files}\n所要時間：{hours}時間{minutes}分{seconds}秒\n{definitions}')
     if versions:
         body += '\nClamAV：' + versions[-1]
     if not clean:
-        body += '\n対象を選び、該当日時のログを確認してください。'
+        body += '\n検査プランを選び、該当日時のログを確認してください。'
     return title, body, urgency

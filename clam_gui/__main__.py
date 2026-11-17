@@ -1,4 +1,5 @@
 """Run with /usr/bin/python3 -m clam_gui."""
+from dataclasses import replace
 from pathlib import Path
 import threading
 import shutil
@@ -9,6 +10,7 @@ from gi.repository import Gio, GLib, Gtk, Pango
 from .core import Store, Plan, engine_status, scan
 from .options import OPTIONS, supported_options, standard_defaults, option_arguments, LIMITS, limit_arguments
 from .schedule import Schedule, Scheduler, read_schedule
+from .runtime import activities, request_stop
 
 
 class Application(Gtk.Application):
@@ -17,6 +19,9 @@ class Application(Gtk.Application):
         self.store = Store()
         self.busy = False
         self.cancel = threading.Event()
+        self.scan_key = None
+        self.schedule_busy = False
+        self.active_runs = []
 
     def do_activate(self):
         if self.get_active_window():
@@ -35,9 +40,6 @@ class Application(Gtk.Application):
             return item
         self.new_action = action('new-target', self.edit_profile)
         self.manage_action = action('manage-targets', self.manage_targets)
-        self.edit_action = action('edit-target', self.edit_selected)
-        self.duplicate_action = action('duplicate-target', self.duplicate_selected)
-        self.delete_action = action('delete-target', self.delete_selected)
         action('preferences', self.preferences)
         action('package-setup', self.package_setup)
         action('quit', self.request_quit)
@@ -48,8 +50,8 @@ class Application(Gtk.Application):
         self.set_accels_for_action('app.shortcuts', ['<Control>question'])
         self.menu_model = Gio.Menu()
         targets = Gio.Menu()
-        targets.append('対象を追加…(_N)', 'app.new-target')
-        targets.append('対象を管理…(_M)', 'app.manage-targets')
+        targets.append('検査プランを追加…(_N)', 'app.new-target')
+        targets.append('検査プランを管理…(_M)', 'app.manage-targets')
         self.menu_model.append_section(None, targets)
         environment = Gio.Menu()
         environment.append('検査設定…(_P)', 'app.preferences')
@@ -68,10 +70,10 @@ class Application(Gtk.Application):
         self.set_accels_for_action('app.open-menu', ['F10'])
         action('open-menu', self.main_menu.popup)
         selector = Gtk.Box(spacing=12)
-        selector.append(Gtk.Label(label='対象', xalign=0))
+        selector.append(Gtk.Label(label='検査プラン', xalign=0))
         self.profile_names = Gtk.StringList.new([])
         self.profiles = Gtk.DropDown(model=self.profile_names, hexpand=True)
-        self.profiles.update_property([Gtk.AccessibleProperty.LABEL], ['ログを見る対象'])
+        self.profiles.update_property([Gtk.AccessibleProperty.LABEL], ['ログを見る検査プラン'])
         self.profiles.connect('notify::selected', self.profile_changed)
         selector.append(self.profiles)
         refresh = Gtk.Button(label='ログを更新')
@@ -113,51 +115,40 @@ class Application(Gtk.Application):
         if self.manager:
             self.manager.present()
             return
-        self.manager = Gtk.Window(application=self, title='対象を管理', transient_for=self.get_active_window(), modal=True)
+        self.manager = Gtk.Window(application=self, title='検査プラン', transient_for=self.get_active_window(), modal=True)
+        self.manager.set_default_size(700, 520)
         self.manager.insert_action_group('app', self)
-        self.manager.set_default_size(780, 550)
+        header = Gtk.HeaderBar()
+        self.add_plan_button = Gtk.Button(icon_name='list-add-symbolic', action_name='app.new-target',
+                                         tooltip_text='検査プランを追加')
+        self.add_plan_button.update_property([Gtk.AccessibleProperty.LABEL], ['検査プランを追加'])
+        header.pack_start(self.add_plan_button)
+        self.manager.set_titlebar(header)
         area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                       margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
+                       margin_top=18, margin_bottom=18, margin_start=18, margin_end=18)
         self.manager.set_child(area)
-        body = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True)
-        area.append(body)
-        self.manager_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
-        self.manager_list.update_property([Gtk.AccessibleProperty.LABEL], ['管理する対象一覧'])
-        self.manager_list.connect('row-selected', lambda *_: self.manager_selected())
-        scroll = Gtk.ScrolledWindow(width_request=230, vexpand=True)
+        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.manager_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, valign=Gtk.Align.START)
+        self.manager_list.add_css_class('boxed-list')
+        self.manager_list.update_property([Gtk.AccessibleProperty.LABEL], ['検査プラン一覧'])
+        self.manager_list.set_placeholder(Gtk.Label(label='検査プランはありません。＋から追加できます。',
+                                                    wrap=True, margin_top=24, margin_bottom=24))
         scroll.set_child(self.manager_list)
-        body.set_start_child(scroll)
-        details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_start=12)
-        body.set_end_child(details)
-        actions = Gtk.Box(spacing=8)
-        for label, name in [('対象を編集', 'edit-target'), ('複製', 'duplicate-target'), ('削除', 'delete-target')]:
-            actions.append(Gtk.Button(label=label, action_name='app.' + name))
-        details.append(actions)
-        manual = Gtk.Box(spacing=8)
-        self.button = Gtk.Button(label='今すぐ検査')
-        self.button.connect('clicked', self.scan_selected)
-        self.stop = Gtk.Button(label='中止', sensitive=self.busy)
-        self.stop.connect('clicked', self.stop_scan)
-        manual.append(self.button)
-        manual.append(self.stop)
-        details.append(manual)
-        self.description = Gtk.Label(xalign=0, yalign=0, wrap=True, selectable=True)
-        scroll = Gtk.ScrolledWindow(vexpand=True)
-        scroll.set_child(self.description)
-        details.append(scroll)
+        area.append(scroll)
         self.manager_notice = Gtk.Label(xalign=0, wrap=True, selectable=True)
         area.append(self.manager_notice)
-        close = Gtk.Button(label='閉じる', halign=Gtk.Align.END)
-        close.connect('clicked', lambda _: self.close_manager())
-        area.append(close)
         self.manager.connect('close-request', lambda _: self.close_manager())
+        self.manager_timer = GLib.timeout_add_seconds(1, self.poll_manager)
         self.refresh_manager()
         self.manager.present()
 
     def close_manager(self):
-        if self.busy:
-            self.manager_notice.set_text('処理中です。検査を中止するか、完了をお待ちください。')
+        if self.schedule_busy or (self.busy and self.scan_key is None):
+            self.manager_notice.set_text('処理中です。完了をお待ちください。')
             return True
+        if getattr(self, 'manager_timer', None):
+            GLib.source_remove(self.manager_timer)
+            self.manager_timer = None
         window = self.manager
         self.manager = None
         self.manager_key = None
@@ -167,33 +158,184 @@ class Application(Gtk.Application):
     def refresh_manager(self):
         if not self.manager:
             return
-        selected_key = self.manager_key
-        self.manager_refreshing = True
         self.manager_profiles = self.store.profiles()
         while self.manager_list.get_first_child():
             self.manager_list.remove(self.manager_list.get_first_child())
+        self.plan_rows = {}
         for key, plan in self.manager_profiles:
-            self.manager_list.append(Gtk.Label(label=plan.label, xalign=0, wrap=True,
-                max_width_chars=24, margin_start=10, margin_end=10, margin_top=10, margin_bottom=10))
-        index = next((i for i, (key, _) in enumerate(self.manager_profiles) if key == selected_key), 0)
-        if self.manager_profiles:
-            self.manager_list.select_row(self.manager_list.get_row_at_index(index))
-        self.manager_refreshing = False
-        self.manager_selected()
+            row = Gtk.ListBoxRow(activatable=False, selectable=False, focusable=False)
+            content = Gtk.Box(spacing=16, margin_start=16, margin_end=16, margin_top=16, margin_bottom=16)
+            row.set_child(content)
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, hexpand=True)
+            title = Gtk.Label(label=plan.label, xalign=0, wrap=True, max_width_chars=36)
+            title.add_css_class('heading')
+            text.append(title)
+            schedule = Gtk.Label(xalign=0, wrap=True)
+            schedule.add_css_class('dim-label')
+            text.append(schedule)
+            status_box = Gtk.Box(spacing=6)
+            spinner = Gtk.Spinner()
+            status = Gtk.Label(xalign=0, wrap=True)
+            status_box.append(spinner)
+            status_box.append(status)
+            text.append(status_box)
+            content.append(text)
+            switch_box = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER)
+            switch_label = Gtk.Label(label='定期検査')
+            switch_box.append(switch_label)
+            switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+            switch.update_property([Gtk.AccessibleProperty.LABEL], [plan.label + 'の定期検査'])
+            switch.set_tooltip_text('次回以降の定期検査を切り替えます。実行中の検査は止めません。')
+            switch_box.append(switch)
+            content.append(switch_box)
+            group = Gio.SimpleActionGroup()
+            actions = {}
+            menu = Gio.Menu()
+            run_menu = Gio.Menu()
+            edit_menu = Gio.Menu()
+            for name, label, section in [('run', '今すぐ検査…(_R)', run_menu),
+                                         ('stop', '検査を中止(_S)', run_menu),
+                                         ('edit', '編集…(_E)', edit_menu),
+                                         ('duplicate', '複製(_D)', edit_menu),
+                                         ('delete', '削除(_X)', edit_menu)]:
+                action = Gio.SimpleAction.new(name, None)
+                action.connect('activate', lambda *_, k=key, n=name: self.plan_action(k, n))
+                group.add_action(action)
+                actions[name] = action
+                item = Gio.MenuItem.new(label, 'plan.' + name)
+                if name == 'stop':
+                    item.set_attribute_value('hidden-when', GLib.Variant('s', 'action-disabled'))
+                section.append_item(item)
+            menu.append_section(None, run_menu)
+            menu.append_section(None, edit_menu)
+            more = Gtk.MenuButton(icon_name='view-more-symbolic', menu_model=menu, valign=Gtk.Align.CENTER,
+                                  tooltip_text=plan.label + 'の操作')
+            more.update_property([Gtk.AccessibleProperty.LABEL], [plan.label + 'の操作'])
+            more.insert_action_group('plan', group)
+            content.append(more)
+            self.plan_rows[key] = dict(plan=plan, switch=switch, schedule=schedule, status=status,
+                                       status_box=status_box, spinner=spinner, actions=actions, more=more,
+                                       updating=False)
+            switch.connect('state-set', lambda _, value, k=key: self.toggle_schedule(k, value))
+            self.manager_list.append(row)
+        self.poll_manager()
 
-    def manager_selected(self):
-        if getattr(self, 'manager_refreshing', False):
+    def poll_manager(self):
+        if not self.manager:
+            return False
+        self.new_action.set_enabled(not self.busy and not self.schedule_busy)
+        try:
+            previous = [(a.token, a.stopping, a.known) for a in self.active_runs]
+            self.active_runs = activities(self.store)
+            failed = False
+        except Exception:
+            failed = True
+            previous = None
+        for key, widgets in self.plan_rows.items():
+            try:
+                schedule = read_schedule(self.store, key)
+                description = replace(schedule, enabled=True).describe().removeprefix('定期検査：')
+                description = description.replace('（端末の現地時刻）', '').strip()
+                if not schedule.enabled:
+                    description += '・停止中'
+                widgets['schedule'].set_text(description)
+                widgets['updating'] = True
+                widgets['switch'].set_active(schedule.enabled)
+                widgets['switch'].set_state(schedule.enabled)
+                widgets['updating'] = False
+            except Exception:
+                widgets['schedule'].set_text('予定を確認できません')
+                schedule = None
+            running = next((a for a in self.active_runs if a.profile_id == key), None)
+            unknown = failed or bool(running and not running.known)
+            widgets['status_box'].set_visible(bool(running) or unknown)
+            widgets['status'].set_text('実行状態を確認できません' if unknown else running.describe() if running else '')
+            widgets['spinner'].set_spinning(bool(running and running.known and not running.stopping))
+            widgets['spinner'].set_visible(bool(running and running.known))
+            blocked = self.schedule_busy or (self.busy and self.scan_key is None)
+            widgets['switch'].set_sensitive(not blocked and schedule is not None and not widgets['plan'].requires_admin)
+            for name in ('edit', 'duplicate', 'delete'):
+                widgets['actions'][name].set_enabled(not self.busy and not self.schedule_busy and not running and not unknown)
+            widgets['actions']['run'].set_enabled(not self.busy and not self.schedule_busy and not self.active_runs and
+                                                   not failed and not widgets['plan'].requires_admin)
+            widgets['actions']['stop'].set_enabled(bool(running and running.known and not running.stopping))
+        if previous is not None and previous != [(a.token, a.stopping, a.known) for a in self.active_runs]:
+            self.history(None)
+        return True
+
+    def plan_action(self, key, name):
+        self.manager_key = key
+        if name == 'stop':
+            self.stop_plan(key)
             return
-        row = self.manager_list.get_selected_row()
-        selected = self.manager_profiles[row.get_index()] if row else None
-        self.manager_key = selected[0] if selected else None
-        self.description.set_text(selected[1].describe(include_policy=False) + '\n' + read_schedule(self.store, selected[0]).describe()
-                                  if selected else '対象はありません。メインメニューから追加できます。')
-        for item in (self.edit_action, self.duplicate_action, self.delete_action):
-            item.set_enabled(bool(selected) and not self.busy)
-        compatible = bool(selected) and len(selected[1].targets) == 1
-        self.button.set_sensitive(compatible and not selected[1].requires_admin and not self.busy)
-        self.manager_list.set_sensitive(not self.busy)
+        if self.schedule_busy or self.busy:
+            return
+        self.poll_manager()
+        widgets = self.plan_rows.get(key)
+        if not widgets or not widgets['actions'][name].get_enabled():
+            return
+        {'edit': self.edit_selected, 'duplicate': self.duplicate_selected,
+         'delete': self.delete_selected, 'run': lambda: self.scan_selected(None)}[name]()
+
+    def toggle_schedule(self, key, enabled):
+        widgets = self.plan_rows.get(key)
+        if not widgets or widgets['updating']:
+            return True
+        if self.schedule_busy or (self.busy and self.scan_key is None):
+            self.poll_manager()
+            return True
+        try:
+            saved = read_schedule(self.store, key)
+            schedule = replace(saved, enabled=enabled)
+            schedule.calendar()
+        except Exception as error:
+            self.show_notice('予定を変更できませんでした：' + str(error))
+            self.poll_manager()
+            return True
+        def apply():
+            self.schedule_busy = True
+            self.poll_manager()
+            def worker():
+                error = None
+                try:
+                    Scheduler(self.store).apply(key, schedule)
+                except Exception as failure:
+                    error = '予定を変更できませんでした：' + str(failure)
+                def finished():
+                    self.schedule_busy = False
+                    self.show_notice(error or ('定期検査を有効にしました。' if enabled else
+                                                '定期検査を停止しました。実行中の検査は続行します。'))
+                    self.poll_manager()
+                    return False
+                GLib.idle_add(finished)
+            threading.Thread(target=worker, daemon=True).start()
+        if enabled and not saved.enabled:
+            dialog = Gtk.MessageDialog(transient_for=self.manager, modal=True,
+                message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
+                text='定期検査を有効にしますか？', secondary_text=schedule.describe() +
+                '\n復帰後の検査がすぐ始まる場合があります。実行中の検査を中止する操作ではありません。')
+            def response(window, answer):
+                window.destroy()
+                if answer == Gtk.ResponseType.OK:
+                    apply()
+                else:
+                    self.poll_manager()
+            dialog.connect('response', response)
+            dialog.present()
+        elif enabled != saved.enabled:
+            apply()
+        return True
+
+    def stop_plan(self, key):
+        try:
+            for activity in activities(self.store):
+                if activity.profile_id == key and activity.known:
+                    request_stop(self.store, activity.token)
+            if self.scan_key == key:
+                self.cancel.set()
+            self.poll_manager()
+        except Exception as error:
+            self.show_notice('中止を依頼できませんでした：' + str(error))
 
     def operation_profile(self):
         if self.manager and self.manager_key:
@@ -447,7 +589,7 @@ class Application(Gtk.Application):
         window.set_child(box)
         state = Gtk.Label(label='ClamAVの対応項目を確認しています…', xalign=0, wrap=True, selectable=True)
         box.append(state)
-        box.append(Gtk.Label(label='全対象の次回以降の手動・定期検査に共通適用します。\n'
+        box.append(Gtk.Label(label='全プランの次回以降の手動・定期検査に共通適用します。\n'
             '形式の解析を無効にしても、その拡張子のファイル全体を除外する意味ではありません。',
             xalign=0, wrap=True))
         pages = Gtk.Notebook(vexpand=True)
@@ -591,7 +733,7 @@ class Application(Gtk.Application):
     def set_controls(self, enabled):
         self.new_action.set_enabled(enabled)
         if self.manager:
-            self.manager_selected()
+            self.poll_manager()
 
     def scan_selected(self, _button):
         selected = self.operation_profile()
@@ -611,7 +753,7 @@ class Application(Gtk.Application):
             key = self.store.duplicate_profile(selected[0])
             self.manager_key = key
             self.refresh_profiles()
-            self.show_notice('対象を複製しました。スケジュールは無効です。名前や条件を編集できます。')
+            self.show_notice('検査プランを複製しました。定期検査は無効です。名前や条件を編集できます。')
         except Exception as error:
             self.show_notice('複製できませんでした：' + str(error))
 
@@ -622,7 +764,7 @@ class Application(Gtk.Application):
         key, plan = selected
         schedule = read_schedule(self.store, key)
         detail = plan.describe() + '\n\n' + schedule.describe()
-        detail += ('\n\nこの対象設定と予定を削除します。実際のファイルと検査履歴は残します。'
+        detail += ('\n\nこの検査プランと予定を削除します。実際のファイルと検査履歴は残します。'
                    '\n実行中の定期検査は完了まで継続します。既存cronは変更しません。')
         dialog = Gtk.MessageDialog(transient_for=self.operation_parent(), modal=True,
             message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.OK_CANCEL,
@@ -635,11 +777,11 @@ class Application(Gtk.Application):
             self.profile_changed()
             self.new_action.set_enabled(False)
             self.set_controls(False)
-            self.show_notice('対象と予定を削除しています…')
+            self.show_notice('検査プランと予定を削除しています…')
             def worker():
                 try:
                     Scheduler(self.store).remove_profile(key)
-                    message = '対象設定と予定を削除しました。検査履歴と実際のファイルは残しています。'
+                    message = '検査プランと予定を削除しました。検査履歴と実際のファイルは残しています。'
                 except Exception as error:
                     message = '削除できませんでした：' + str(error)
                 def finished():
@@ -655,10 +797,10 @@ class Application(Gtk.Application):
         dialog.present()
 
     def edit_profile(self, key=None, plan=None):
-        if self.busy:
+        if self.busy or self.schedule_busy:
             return
         plan = plan or Plan('', [str(Path.home())], [])
-        editor = Gtk.Window(application=self, title='検査対象の設定', transient_for=self.operation_parent(), modal=True)
+        editor = Gtk.Window(application=self, title='検査プランの設定', transient_for=self.operation_parent(), modal=True)
         editor.set_default_size(650, 550)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
                       margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
@@ -673,7 +815,7 @@ class Application(Gtk.Application):
             (container or box).append(widget)
             widget.update_property([Gtk.AccessibleProperty.LABEL], [label])
             return widget
-        name = entry('設定の名前（例：仕事の資料）', plan.label)
+        name = entry('プラン名（例：仕事の資料）', plan.label)
         root_row = Gtk.Box(spacing=8)
         root = entry('基本の対象フォルダー', str(plan.targets[0]), root_row)
         box.append(root_row)
@@ -734,7 +876,7 @@ class Application(Gtk.Application):
         editor.connect('close-request', lambda _: state['running'])
         error_label = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.append(error_label)
-        save = Gtk.Button(label='対象設定を保存')
+        save = Gtk.Button(label='検査プランを保存')
         save.add_css_class('suggested-action')
         def save_profile(_button):
             nonlocal key
@@ -769,11 +911,11 @@ class Application(Gtk.Application):
                     error_label.set_text(str(error))
                 return
             detail = new.describe() + '\n\n' + schedule.describe()
-            detail += ('\n\n対象設定と予定を保存します。有効化時は検査がすぐ始まる場合があります。'
+            detail += ('\n\n検査プランと予定を保存します。有効化時は検査がすぐ始まる場合があります。'
                        '\n無効化しても実行中の検査は完了まで続けます。')
             dialog = Gtk.MessageDialog(transient_for=editor, modal=True,
                 message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
-                text='対象設定とこの予定を保存しますか？', secondary_text=detail)
+                text='検査プランとこの予定を保存しますか？', secondary_text=detail)
             def response(d, answer):
                 d.destroy()
                 if answer != Gtk.ResponseType.OK or self.busy:
@@ -782,7 +924,7 @@ class Application(Gtk.Application):
                 self.busy = True
                 box.set_sensitive(False)
                 self.set_controls(False)
-                error_label.set_text('対象設定と予定を保存しています…')
+                error_label.set_text('検査プランと予定を保存しています…')
                 def worker():
                     nonlocal key
                     profile_saved = False
@@ -792,8 +934,8 @@ class Application(Gtk.Application):
                         profile_saved = True
                         Scheduler(self.store).apply(key, schedule)
                     except Exception as failure:
-                        prefix = ('対象設定は保存しましたが、予定を登録できませんでした：'
-                                  if profile_saved else '対象設定を保存できませんでした：')
+                        prefix = ('検査プランは保存しましたが、予定を登録できませんでした：'
+                                  if profile_saved else '検査プランを保存できませんでした：')
                         error = prefix + str(failure)
                     def finished():
                         state['running'] = False
@@ -883,17 +1025,13 @@ class Application(Gtk.Application):
                 self.busy = True
                 self.cancel.clear()
                 self.set_controls(False)
-                self.stop.set_sensitive(True)
+                self.scan_key = key
+                if self.manager:
+                    self.poll_manager()
                 self.show_notice('検査中：' + plan.label)
                 threading.Thread(target=self.run_scan, args=(plan, key), daemon=True).start()
         dialog.connect('response', response)
         dialog.present()
-
-    def stop_scan(self, _button):
-        if self.busy:
-            self.cancel.set()
-            self.stop.set_sensitive(False)
-            self.show_notice('検査を停止しています…')
 
     def run_scan(self, target, key):
         try:
@@ -904,11 +1042,10 @@ class Application(Gtk.Application):
 
     def finished(self, status, output):
         self.busy = False
+        self.scan_key = None
         self.set_controls(True)
         self.history(None)
         self.show_notice(status)
-        if self.manager:
-            self.stop.set_sensitive(False)
         notification = Gio.Notification.new('ClamAV検査終了')
         from .mailboxes import MAILBOX_NOTE
         if MAILBOX_NOTE in status:
@@ -1009,7 +1146,7 @@ class Application(Gtk.Application):
             self.quit()
 
     def on_close(self, _window):
-        if self.busy:
+        if self.busy or self.schedule_busy:
             self.show_notice('処理中です。完了するまで終了できません。')
             return True
         return False

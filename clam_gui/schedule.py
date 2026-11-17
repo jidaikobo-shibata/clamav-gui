@@ -121,7 +121,7 @@ class Scheduler:
     def apply(self, key, schedule):
         plan = dict(self.store.profiles()).get(key)
         if plan is None:
-            raise ValueError('対象設定が見つかりません。')
+            raise ValueError('検査プランが見つかりません。')
         if schedule.enabled:
             validate_profile(plan)
         if schedule.enabled and plan.requires_admin:
@@ -191,4 +191,4 @@ class Scheduler:
                 if text is not None:
                     self.write(path, text)
             # Leave the schedule disabled after a failed deletion, rather than restart scans.
-            raise RuntimeError('削除を完了できませんでした。対象設定は残しています。予定の状態を確認してください。')
+            raise RuntimeError('削除を完了できませんでした。検査プランは残しています。予定の状態を確認してください。')

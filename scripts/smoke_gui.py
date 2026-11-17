@@ -70,57 +70,98 @@ def check():
     app.history_list.select_row(app.history_list.get_row_at_index(1))
     buffer = app.result.get_buffer()
     assert 'normal log' in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
-    app.manage_targets()
-    assert app.manager.get_modal()
     def descendants(widget):
         yield widget
         child = widget.get_first_child()
         while child:
             yield from descendants(child)
             child = child.get_next_sibling()
-    widgets = list(descendants(app.manager))
-    action_buttons = [w for w in widgets if isinstance(w, Gtk.Button) and
-                      w.get_action_name() in ('app.edit-target', 'app.duplicate-target', 'app.delete-target')]
-    assert len(action_buttons) == 3
-    assert next(w for w in action_buttons if w.get_action_name() == 'app.edit-target').get_label() == '対象を編集'
-    assert not any(isinstance(w, Gtk.Button) and w.get_label() == 'スケジュール' for w in widgets)
-    assert all(w.get_sensitive() for w in action_buttons)
-    assert 'フィッシング検査' not in app.description.get_text()
-    assert '定義が3日' not in app.description.get_text()
-    assert '削除・隔離' not in app.description.get_text()
-    assert len(app.manager_profiles) == 1
-    app.manager_list.select_row(app.manager_list.get_row_at_index(0))
-    app.duplicate_selected()
+    app.manage_targets()
+    assert app.manager.get_modal()
+    assert app.manager.get_title() == '検査プラン'
+    assert app.manager_list.get_selection_mode() == Gtk.SelectionMode.NONE
+    assert key in app.plan_rows
+    assert app.add_plan_button.get_action_name() == 'app.new-target'
+    # Adding from the manager must not save on cancel.
+    count = len(app.store.profiles())
+    app.add_plan_button.emit('clicked')
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+    assert editor.get_transient_for() == app.manager
+    editor.destroy()
+    assert len(app.store.profiles()) == count
+    row = app.plan_rows[key]
+    labels = [w.get_text() for w in descendants(app.manager_list) if isinstance(w, Gtk.Label)]
+    assert str(Path.home()) not in labels
+    assert '停止中' in row['schedule'].get_text()
+    assert not row['status_box'].get_visible()
+    assert app.plan_rows[key]['more'].activate_action('plan.duplicate', None)
+    duplicate = app.manager_key
     assert app.operation_profile()[1].label.endswith('（複製）')
     before = len(app.store.profiles())
-    app.delete_selected()
-    dialogs = [w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog)]
-    assert len(dialogs) == 1
-    dialogs[0].response(Gtk.ResponseType.CANCEL)
+    app.plan_action(duplicate, 'delete')
+    dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+    dialog.response(Gtk.ResponseType.CANCEL)
     assert len(app.store.profiles()) == before
-    action_buttons[0].emit('clicked')
-    editors = [w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査対象の設定']
-    assert len(editors) == 1
-    assert editors[0].get_transient_for() == app.manager
-    editor_widgets = list(descendants(editors[0]))
-    folder = next(w for w in editor_widgets if isinstance(w, Gtk.Button) and w.get_icon_name() == 'folder-open-symbolic')
+    assert app.plan_rows[key]['more'].activate_action('plan.edit', None)
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+    fields = list(descendants(editor))
+    folder = next(w for w in fields if isinstance(w, Gtk.Button) and w.get_icon_name() == 'folder-open-symbolic')
     assert isinstance(folder.get_parent().get_first_child(), Gtk.Entry)
-    exclusion_buttons = [w for w in editor_widgets if isinstance(w, Gtk.Button) and w.get_label() in
-                         ('除外フォルダーを追加', '除外ファイルを追加')]
-    assert exclusion_buttons[0].get_parent() == exclusion_buttons[1].get_parent()
-    save = next(w for w in editor_widgets if isinstance(w, Gtk.Button) and w.get_label() == '対象設定を保存')
-    cancel = next(w for w in editor_widgets if isinstance(w, Gtk.Button) and w.get_label() == 'キャンセル')
+    save = next(w for w in fields if isinstance(w, Gtk.Button) and w.get_label() == '検査プランを保存')
+    cancel = next(w for w in fields if isinstance(w, Gtk.Button) and w.get_label() == 'キャンセル')
     assert save.get_parent() == cancel.get_parent()
-    assert cancel.get_next_sibling() == save
-    assert save.has_css_class('suggested-action')
-    editors[0].destroy()
+    editor.destroy()
+    from clam_gui.runtime import track_scan, activities
+    from clam_gui.schedule import Schedule, save_schedule, read_schedule
+    import datetime, time
+    def settle_schedule():
+        deadline = time.monotonic() + 3
+        while app.schedule_busy and time.monotonic() < deadline:
+            GLib.MainContext.default().iteration(False)
+            time.sleep(.01)
+        assert not app.schedule_busy
+    save_schedule(app.store, key, Schedule(True, hour=2))
+    with track_scan(app.store, key, datetime.datetime.now().astimezone().isoformat()):
+        app.poll_manager()
+        row = app.plan_rows[key]
+        assert '02:00' in row['schedule'].get_text()
+        assert row['status_box'].get_visible()
+        assert row['spinner'].get_spinning()
+        assert not row['actions']['edit'].get_enabled()
+        assert row['actions']['stop'].get_enabled()
+        # Disabling the schedule never cancels the current scan.
+        with patch('clam_gui.__main__.Scheduler') as manager:
+            manager.return_value.apply.side_effect = lambda k, schedule: save_schedule(app.store, k, schedule)
+            row['switch'].set_active(False)
+            settle_schedule()
+        assert not read_schedule(app.store, key).enabled
+        assert not activities(app.store)[0].stopping
+        app.plan_action(key, 'stop')
+        assert activities(app.store)[0].stopping
+        assert '中止しています' in row['status'].get_text()
+    app.poll_manager()
+    assert not app.plan_rows[key]['status_box'].get_visible()
+    with patch('clam_gui.__main__.activities', side_effect=OSError('mock unavailable')):
+        app.poll_manager()
+        assert app.plan_rows[key]['status'].get_text() == '実行状態を確認できません'
+        assert not app.plan_rows[key]['actions']['run'].get_enabled()
+    app.poll_manager()
+    # Failed switch changes must show the stored state again.
+    with patch('clam_gui.__main__.Scheduler') as manager:
+        manager.return_value.apply.side_effect = RuntimeError('mock schedule failure')
+        app.plan_rows[key]['switch'].set_active(True)
+        dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+        dialog.response(Gtk.ResponseType.OK)
+        settle_schedule()
+        assert not app.plan_rows[key]['switch'].get_active()
+        assert '変更できませんでした' in app.manager_notice.get_text()
     app.close_manager()
     # Exercise editor persistence and recovery without registering actual timers.
     from clam_gui.schedule import save_schedule, read_schedule
     import time
     before = len(app.store.profiles())
     app.edit_profile(plan=Plan('予定つき試験', [str(app.store.path.parent)], []))
-    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査対象の設定')
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
     fields = list(descendants(editor))
     enabled = next(w for w in fields if isinstance(w, Gtk.CheckButton) and w.get_label() == '定期検査を有効にする')
     assert not enabled.get_active()
@@ -130,7 +171,7 @@ def check():
     interval = next(w for w in fields if isinstance(w, Gtk.SpinButton) and w.get_parent().get_first_child().get_text() == '間隔（1〜1440分）')
     assert interval.get_parent().get_visible()
     interval.set_value(7)
-    save_editor = next(w for w in fields if isinstance(w, Gtk.Button) and w.get_label() == '対象設定を保存')
+    save_editor = next(w for w in fields if isinstance(w, Gtk.Button) and w.get_label() == '検査プランを保存')
     def confirmation(answer):
         dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
         dialog.response(answer)
@@ -150,7 +191,7 @@ def check():
         settle()
         assert len(app.store.profiles()) == before + 1
         assert editor.get_visible()
-        assert any(isinstance(w, Gtk.Label) and '対象設定は保存しましたが' in w.get_text() for w in fields)
+        assert any(isinstance(w, Gtk.Label) and '検査プランは保存しましたが' in w.get_text() for w in fields)
         new_key = next(k for k, p in app.store.profiles() if p.label == '予定つき試験')
         manager.return_value.apply.side_effect = lambda key, schedule: save_schedule(app.store, key, schedule)
         save_editor.emit('clicked')
@@ -161,10 +202,10 @@ def check():
         assert read_schedule(app.store, new_key).interval_minutes == 7
         manager.return_value.apply.reset_mock()
         app.edit_profile(new_key, dict(app.store.profiles())[new_key])
-        editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査対象の設定')
+        editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
         fields = list(descendants(editor))
         assert next(w for w in fields if isinstance(w, Gtk.CheckButton)).get_active()
-        next(w for w in fields if isinstance(w, Gtk.Button) and w.get_label() == '対象設定を保存').emit('clicked')
+        next(w for w in fields if isinstance(w, Gtk.Button) and w.get_label() == '検査プランを保存').emit('clicked')
         manager.return_value.apply.assert_not_called()
     app.preferences()
     preferences = [w for w in Gtk.Window.list_toplevels() if w.get_title() == '環境設定']

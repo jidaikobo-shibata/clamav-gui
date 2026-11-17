@@ -21,7 +21,7 @@ def main():
     store = Store(args.data_dir)
     plan = dict(store.profiles()).get(args.profile)
     if plan is None:
-        print('対象設定が見つかりません。', file=sys.stderr)
+        print('検査プランが見つかりません。', file=sys.stderr)
         return 2
     if not read_schedule(store, args.profile).enabled:
         return 0
