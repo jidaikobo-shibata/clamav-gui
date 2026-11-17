@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+from .mailboxes import MAILBOX_NOTE, mailbox_findings, mailbox_guidance
 from .options import DEFAULTS, supported_options, option_arguments, describe_options, LIMITS, validate_limits, limit_arguments, describe_limits
 
 
@@ -367,6 +368,12 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None):
                 status = summarize(code, output, cancelled)
             except OSError as error:
                 status, output = '検査不完了：ClamAVを実行できませんでした', str(error)
+    findings = mailbox_findings(output, plan.targets)
+    if findings:
+        status += f'\n{MAILBOX_NOTE}（検出された保存ファイル：{len(findings)}件）'
+        status += '\n複数のメールをまとめて保存できる形式です。'
+        status += '\n保存ファイル自体は削除せず、メールアプリで確認してください。'
+        output += '\n\n' + mailbox_guidance(findings)
     output += '\n\n--- この検査で使用した設定 ---\n' + describe_options(settings, supported)
     output += '\n' + describe_limits(limits)
     output += '\n検査上限の警告・ヒューリスティック警告: 有効（固定）\n'

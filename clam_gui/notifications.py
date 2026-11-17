@@ -2,6 +2,7 @@
 import datetime
 from pathlib import Path
 import re
+from .mailboxes import MAILBOX_NOTE
 
 
 def definition_status(directory=Path('/var/lib/clamav'), now=None):
@@ -25,6 +26,8 @@ def scan_notification(label, status, output, started, finished, definitions):
         title, urgency = 'ClamAV 検出報告', 'critical'
     else:
         title, urgency = 'ClamAV 検査不完了', 'critical'
+    if MAILBOX_NOTE in status:
+        title = 'ClamAV メール保存ファイル内で脅威を検出'
     counts = re.findall(r'^Scanned files:\s*(\d+)\s*$', output, re.M)
     files = str(sum(map(int, counts))) if counts else '不明'
     seconds = max(0, int((finished - started).total_seconds()))

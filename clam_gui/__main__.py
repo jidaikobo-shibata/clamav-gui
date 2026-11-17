@@ -882,7 +882,12 @@ class Application(Gtk.Application):
         if self.manager:
             self.stop.set_sensitive(False)
         notification = Gio.Notification.new('ClamAV検査終了')
-        notification.set_body(status.splitlines()[0])
+        from .mailboxes import MAILBOX_NOTE
+        if MAILBOX_NOTE in status:
+            notification.set_title('メール保存ファイル内で脅威を検出しました')
+            notification.set_body('複数のメールをまとめた形式です。ファイル自体は削除せず、メールアプリで確認してください。詳細は検査ログをご覧ください。')
+        else:
+            notification.set_body(status.splitlines()[0])
         self.send_notification('scan-result', notification)
         return False
 

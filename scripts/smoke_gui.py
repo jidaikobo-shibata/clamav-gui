@@ -18,6 +18,7 @@ with tempfile.TemporaryDirectory(prefix='clam-gui-smoke-') as root:
 from gi.repository import GLib, Gtk, Gio
 from pathlib import Path
 from clam_gui.core import Plan
+from clam_gui.mailboxes import MAILBOX_NOTE, mailbox_guidance
 app = Application()
 def check():
     assert app.menu_model.get_n_items() == 2
@@ -26,11 +27,14 @@ def check():
     key = app.store.save_profile(Plan('試験対象', [str(Path.home())], []))
     plan = dict(app.store.profiles())[key]
     app.store.save('2026-11-16T10:00:00+09:00', plan.describe(), '検査完了', 'normal log', key)
-    app.store.save('2026-11-16T11:00:00+09:00', plan.describe(), '検出あり', 'sample: Test FOUND', key)
+    app.store.save('2026-11-16T11:00:00+09:00', plan.describe(), '検出あり' + MAILBOX_NOTE, mailbox_guidance([('/example/INBOX', False)]), key)
     app.refresh_profiles(key)
     assert len(app.log_entries) == 2
     assert app.history_list.get_row_at_index(0).get_child().get_attributes() is not None
     assert app.history_list.get_row_at_index(1).get_child().get_attributes() is None
+    app.history_list.select_row(app.history_list.get_row_at_index(0))
+    buffer = app.result.get_buffer()
+    assert '保存ファイル自体は削除せず' in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
     app.history_list.select_row(app.history_list.get_row_at_index(1))
     buffer = app.result.get_buffer()
     assert 'normal log' in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
