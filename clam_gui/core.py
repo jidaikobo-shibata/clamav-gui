@@ -13,13 +13,15 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
+from .paths import database_directory, find_clamav
 from .runtime import track_scan
 from .mailboxes import MAILBOX_NOTE, mailbox_findings, mailbox_guidance
 from .options import DEFAULTS, supported_options, option_arguments, describe_options, LIMITS, validate_limits, limit_arguments, describe_limits
 
 
 def engine_status():
-    binary = shutil.which('clamscan')
+    binary = find_clamav('clamscan')
     if not binary:
         return 'ClamAVが見つかりません。OS側への導入が必要です。'
     try:
@@ -336,7 +338,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None):
     if plan.requires_admin:
         raise ValueError('この設定は管理者権限が必要です。GUIでの実行にはまだ対応していません。')
     validate_profile(plan)
-    binary = shutil.which('clamscan')
+    binary = find_clamav('clamscan')
     if not binary:
         raise ValueError('ClamAVが見つかりません。')
     settings = store.scan_options()
@@ -355,6 +357,8 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None):
             command = [binary, '--recursive', '--suppress-ok-results',
                        '--heuristic-alerts=yes', '--alert-exceeds-max=yes',
                        '--fail-if-cvd-older-than=3']
+            if sys.platform == 'darwin':
+                command.append('--database=' + str(database_directory()))
             command += arguments
             command += ['--exclude=^' + re.escape(str(p)) + '$' for p in plan.excludes]
             command += ['--exclude-dir=^' + re.escape(os.path.normpath(str(p))) + r'(/|$)'

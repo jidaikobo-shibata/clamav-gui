@@ -4,6 +4,7 @@ from pathlib import Path
 import threading
 import time
 import shutil
+import sys
 import gi
 
 gi.require_version('Gtk', '4.0')
@@ -13,6 +14,9 @@ from .options import OPTIONS, supported_options, standard_defaults, option_argum
 from .schedule import Schedule, Scheduler, read_schedule
 from .runtime import activities, request_stop
 from .definitions import definition_update_label, AutoUpdateService, AutoUpdateState
+from .paths import database_directory, find_clamav
+if sys.platform == 'darwin':
+    from .macos_schedule import MacScheduler as Scheduler
 
 
 class Application(Gtk.Application):
@@ -30,12 +34,13 @@ class Application(Gtk.Application):
         self.auto_checked_at = None
         self.install_prompt_checked = False
         self.install_prompt = None
+        self.setup_window = None
 
     def do_activate(self):
         if self.get_active_window():
             self.get_active_window().present()
             return
-        window = Gtk.ApplicationWindow(application=self, title='ClamAV GUI — 開発版')
+        window = Gtk.ApplicationWindow(application=self, title='ClamAV GUI' if sys.platform == 'darwin' else 'ClamAV GUI — 開発版')
         window.set_default_size(1160, 680)
         self.window = window
         window.connect('close-request', self.on_close)
@@ -58,18 +63,20 @@ class Application(Gtk.Application):
         action('preferences', self.preferences)
         action('package-setup', self.package_setup)
         action('quit', self.request_quit)
-        self.set_accels_for_action('app.quit', ['<Control>q'])
+        primary = '<Meta>' if sys.platform == 'darwin' else '<Control>'
+        self.set_accels_for_action('app.quit', [primary + 'q'])
         action('shortcuts', self.show_shortcuts)
         action('about', self.show_about)
-        self.set_accels_for_action('app.preferences', ['<Control>comma'])
-        self.set_accels_for_action('app.shortcuts', ['<Control>question'])
+        self.set_accels_for_action('app.preferences', [primary + 'comma'])
+        self.set_accels_for_action('app.shortcuts', [primary + 'question'])
         self.menu_model = Gio.Menu()
         targets = Gio.Menu()
         targets.append('検査プランを追加…(_N)', 'app.new-target')
         self.menu_model.append_section(None, targets)
         environment = Gio.Menu()
         environment.append('検査設定…(_P)', 'app.preferences')
-        environment.append('ClamAVの管理…(_C)', 'app.package-setup')
+        environment.append('検査の準備・更新…(_C)' if sys.platform == 'darwin' else
+                           'ClamAVの管理…(_C)', 'app.package-setup')
         self.menu_model.append_section(None, environment)
         information = Gio.Menu()
         information.append('キーボードショートカット(_K)', 'app.shortcuts')
@@ -146,6 +153,9 @@ class Application(Gtk.Application):
             return True
         self.install_prompt_timer = None
         self.install_prompt_checked = True
+        if sys.platform == 'darwin':
+            self.open_mac_setup(only_if_needed=True)
+            return False
         if shutil.which('clamscan'):
             return False
         dialog = Gtk.MessageDialog(application=self, transient_for=self.window, modal=True,
@@ -266,7 +276,7 @@ class Application(Gtk.Application):
 
     def poll_plans(self):
         self.refresh_auto_status()
-        self.definition_label.set_text(definition_update_label())
+        self.definition_label.set_text(definition_update_label(database_directory()))
         self.definition_button.set_sensitive(not self.busy and not self.schedule_busy)
         self.new_action.set_enabled(not self.busy and not self.schedule_busy)
         try:
@@ -283,6 +293,8 @@ class Application(Gtk.Application):
                 description = description.replace('（端末の現地時刻）', '').strip()
                 if not schedule.enabled:
                     description += '・停止中'
+                elif sys.platform == 'darwin' and Scheduler(self.store).needs_repair(key, schedule):
+                    description += '・再登録が必要'
                 widgets['schedule'].set_text(description)
                 widgets['updating'] = True
                 widgets['switch'].set_active(schedule.enabled)
@@ -409,7 +421,11 @@ class Application(Gtk.Application):
         generation = self.auto_generation
         def worker():
             try:
-                status = AutoUpdateService().status()
+                if sys.platform == 'darwin':
+                    from .macos_update import MacAutoUpdateService
+                    status = MacAutoUpdateService().status()
+                else:
+                    status = AutoUpdateService().status()
             except Exception as error:
                 status = AutoUpdateState(detail=str(error))
             def finished():
@@ -421,7 +437,18 @@ class Application(Gtk.Application):
             GLib.idle_add(finished)
         threading.Thread(target=worker, daemon=True).start()
 
+    def open_mac_setup(self, only_if_needed=False):
+        if self.setup_window and not self.setup_window.closed:
+            if not only_if_needed:
+                self.setup_window.present()
+            return self.setup_window
+        from .setup_window import SetupWindow
+        self.setup_window = SetupWindow(self, only_if_needed=only_if_needed)
+        return self.setup_window
+
     def package_setup(self, manager=None, updater=None, update_only=False, auto_manager=None):
+        if sys.platform == 'darwin' and manager is None and updater is None and auto_manager is None:
+            return self.open_mac_setup()
         from .packages import AptManager, PACKAGES
         from .notifications import definition_status
         manager = manager or AptManager()
@@ -840,7 +867,7 @@ class Application(Gtk.Application):
         box.append(row)
         def check_support():
             try:
-                binary = shutil.which('clamscan')
+                binary = find_clamav('clamscan')
                 if not binary:
                     raise ValueError('ClamAVが見つかりません。')
                 available = supported_options(binary)
@@ -1061,6 +1088,12 @@ class Application(Gtk.Application):
                 self.action_key = key
                 self.refresh_profiles(key if is_new else None)
             changed = schedule != saved_schedule
+            if sys.platform == 'darwin' and schedule.enabled:
+                try:
+                    changed = changed or Scheduler(self.store).needs_repair(key, schedule)
+                except Exception as error:
+                    error_label.set_text('予定の登録状態を確認できませんでした：' + str(error))
+                    return
             if not changed:
                 try:
                     key = self.store.save_profile(new, key)
@@ -1162,7 +1195,8 @@ class Application(Gtk.Application):
             else:
                 text = ('端末の現地時刻で実行します。画面を閉じても動きます。\n'
                         'ログイン後に逃した予定を1回実行します。電源オフ中は動きません。')
-            hint.set_text(text + '\n既存cronと同じ対象の予定を重複させないでください。')
+            hint.set_text(text + ('\n他のアプリと同じ対象の予定を重複させないでください。' if sys.platform == 'darwin' else
+                                 '\n既存cronと同じ対象の予定を重複させないでください。'))
         frequency.connect('notify::selected', frequency_changed)
         frequency_changed()
         def read():
@@ -1217,7 +1251,14 @@ class Application(Gtk.Application):
             notification.set_body('複数のメールをまとめた形式です。ファイル自体は削除せず、メールアプリで確認してください。詳細は検査ログをご覧ください。')
         else:
             notification.set_body(status.splitlines()[0])
-        self.send_notification('scan-result', notification)
+        if sys.platform == 'darwin':
+            from .macos_notifications import send
+            title = 'ClamAV メール保存ファイル内で脅威を検出' if MAILBOX_NOTE in status else 'ClamAV 検査終了'
+            body = ('複数のメールをまとめた形式です。ファイル自体は削除せず、メールアプリで確認してください。'
+                    '詳細は検査ログをご覧ください。' if MAILBOX_NOTE in status else status.splitlines()[0])
+            threading.Thread(target=send, args=(title, body), daemon=True).start()
+        else:
+            self.send_notification('scan-result', notification)
         return False
 
     def history(self, _button):
@@ -1267,11 +1308,12 @@ class Application(Gtk.Application):
         window.set_titlebar(header)
         grid = Gtk.Grid(column_spacing=32, row_spacing=18, margin_top=24,
                         margin_bottom=24, margin_start=24, margin_end=24)
+        primary = '<Meta>' if sys.platform == 'darwin' else '<Control>'
         for row, (title, accelerator) in enumerate([
-                ('アプリケーションを終了', '<Control>q'),
+                ('アプリケーションを終了', primary + 'q'),
                 ('メインメニューを開く', 'F10'),
-                ('検査設定を開く', '<Control>comma'),
-                ('ショートカットを表示', '<Control>question'),
+                ('検査設定を開く', primary + 'comma'),
+                ('ショートカットを表示', primary + 'question'),
                 ('この一覧を閉じる', 'Escape')]):
             grid.attach(Gtk.Label(label=title, xalign=0, hexpand=True), 0, row, 1, 1)
             grid.attach(Gtk.ShortcutLabel(accelerator=accelerator), 1, row, 1, 1)
@@ -1293,7 +1335,7 @@ class Application(Gtk.Application):
             window.present()
             return
         window = Gtk.AboutDialog(application=self, transient_for=self.operation_parent(),
-                                 modal=True, program_name='ClamAV GUI', version='開発版',
+                                 modal=True, program_name='ClamAV GUI', version='1.0.0' if sys.platform == 'darwin' else '開発版',
                                  comments='ClamAVの検査対象・定期実行・検査履歴を管理します。',
                                  website='https://github.com/jidaikobo-shibata/clamav-gui',
                                  website_label='プロジェクトのページ',

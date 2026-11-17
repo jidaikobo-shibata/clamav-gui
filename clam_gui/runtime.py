@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import datetime
 import os
+import sys
 import sqlite3
 from pathlib import Path
 import uuid
@@ -10,6 +11,11 @@ import uuid
 
 def process_identity(pid):
     """Linux boot/start identity prevents stale records from matching a reused PID."""
+    if type(pid) is not int or not 1 <= pid <= 2147483647:
+        return None
+    if sys.platform == 'darwin':
+        from .macos_process import process_identity as mac_identity
+        return mac_identity(pid)
     try:
         text = Path(f'/proc/{pid}/stat').read_text()
         fields = text[text.rindex(')') + 2:].split()

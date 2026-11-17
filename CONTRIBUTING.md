@@ -5,6 +5,13 @@ README.mdと既存コードを読んだうえで、以下に沿って実装し�
 Ubuntuの実装を維持しながら、macOSで日常的に使える状態へ移植することが目的です。
 計画の説明だけで終えず、小さな単位で実装・検証・記録を進めてください。
 
+2026-11-17: macOSの起動時準備・自動更新・定期検査・通知・導入元を識別した削除と、実行環境の同梱処理を追加しました。
+新規導入はHomebrewを利用者に要求せず、検証済みの公式ClamAVパッケージをOS標準インストーラーで開きます。
+既存のHomebrew版は検出して利用します。定義はアプリ専用領域に取得し、共通の検査処理へ保存先を渡します。
+ユーザーLaunchAgentとGUI非依存のヘルパーで、GUI終了中も更新・検査できます。
+以下は保守時の設計方針と検証項目です。公開署名・公証、別Macでの確認は別工程です。
+検証内容・未完了事項は `.codex/work-log.md` とREADMEのmacOS節を参照してください。
+
 ## 1. 最初に確認すること
 
 - リポジトリは `https://github.com/jidaikobo-shibata/clamav-gui`。Ubuntuの個別運用を含む別のリポジトリは移植対象にしません。
@@ -15,7 +22,8 @@ Ubuntuの実装を維持しながら、macOSで日常的に使える状態へ移
 - macOS実機がない場合は、実機確認したと装わず、可能な共通化・模擬テストまでと未検証事項を区別してください。
 
 引き継ぎ時点ではUbuntu版の導入・削除・再導入を実環境で確認しています。
-macOS版は未実装・未検証です。Ubuntu版が動くことはmacOS版の動作保証にはなりません。
+macOS版はApple Siliconで実機検証し、Intel版はRosetta検証と物理実機の確認を区別します。
+Ubuntu版の実画面確認と、macOS版の確認を同一視しないでください。
 
 ## 2. 製品として維持する方針
 
@@ -67,18 +75,23 @@ macOS版は未実装・未検証です。Ubuntu版が動くことはmacOS版の�
 
 | ファイル | 役割と移植上の注意 |
 |---|---|
-| `clam_gui/__main__.py` | GUI、起動案内、導入・更新画面。現在はUbuntu用クラスを直接利用しているので、OSに応じた実装を接続する |
+| `clam_gui/__main__.py` | GUI、起動案内、OS別バックエンドの接続。macOSの準備・管理画面は `setup_window.py` |
 | `clam_gui/core.py` | SQLite、プラン・設定・履歴、検査実行、開始失敗の保存。既存IDと履歴を維持する |
 | `clam_gui/options.py` | 許可した検査オプション・サイズ上限、実際のClamAVのhelpからの対応/初期値確認 |
 | `clam_gui/mailboxes.py` | mboxの保守的な形式判定と、保存ファイル全体を削除しない案内 |
 | `clam_gui/packages.py` | APT・dpkg・pkexec・Linuxのcgroup。macOSでこの実装を実行しない |
 | `clam_gui/definitions.py` | 定義の日時表示、FreshClamのsystemd管理、journal解析。一式をmacOS方式へ対応させる |
 | `clam_gui/schedule.py` | ユーザーsystemdのunit生成・登録・解除。固定 `/usr/bin/python3` を含む |
-| `clam_gui/runtime.py` | GUI/CLI共有の実行記録と中止依頼。現在の生存確認はLinuxの `/proc` とboot ID/start time |
+| `clam_gui/runtime.py` | GUI/CLI共有の実行記録と中止依頼。Linuxの `/proc` とmacOSのlibprocによる開始識別を使う |
 | `clam_gui/notifications.py` | 通知文と定義状態。定義の既定パスはLinux向け |
 | `scripts/run_scheduled.py` | GTKを読み込まない検査CLI。現在の配送は `notify-send` |
 | `scripts/launch_gui.py`, `scripts/install_launcher.py` | LinuxのDesktop Entry起動。Finder用の起動方法は別途必要 |
 | `scripts/smoke_gui.py` | Ubuntu用の独立Wayland/Weston・D-Bus検証。macOSで実行する手順にはしない |
+| `clam_gui/launchd.py`, `macos_schedule.py` | アプリ所有plistの保護、暦指定、完了基準の間隔、設定復元 |
+| `clam_gui/macos_setup.py`, `macos_update.py` | 公式パッケージの検証、専用定義・設定、手動/自動更新と状態監視 |
+| `clam_gui/macos_packages.py` | 公式/Homebrew版の削除予定、所有元・権限・変更再確認、取消時の設定復元 |
+| `scripts/macos_helper.py`, `macos_notify.m` | GUI非依存の検査/更新と、ネイティブ通知アプリ。権限要求はLaunchServices経由 |
+| `scripts/build_macos.py`, `collect_macos_sources.py` | CPU別の同梱アプリ、アイコン、権利表記、固定ハッシュ付きの対応ソース |
 
 OS差分は小さなバックエンド/アダプターへ分離し、共通UIと検査ロジックを維持してください。
 設計例としてOS別のpaths・packages・definitions・scheduler・notifications・process identityが考えられますが、
@@ -89,7 +102,7 @@ Ubuntuで使う保存場所・アプリID・unit名・共通ロックの意味�
 
 ### 5.1 起動環境とパス
 
-- 最初はHomebrewを主要な導入元とします。既存の別方式のClamAVも検出し、所有元を判定できないものをHomebrewで削除しないでください。
+- 既存Homebrew版と公式パッケージ版を検出します。初回準備ではHomebrewなしでも進められるよう公式パッケージを利用します。所有元を判定できないものを削除しないでください。
 - Homebrewには `gtk4`、`pygobject3`、`clamav` があります。使用するPythonとGIの組合せは実機で確認してください。
 - Apple SiliconとIntelのprefixの違いを考慮し、実際の `brew --prefix` 等で確認します。片方でしか検証できなければ、その範囲を明記してください。
 - Finder起動はTerminalのPATHやシェル初期化ファイルに依存させません。
@@ -99,7 +112,7 @@ Ubuntuで使う保存場所・アプリID・unit名・共通ロックの意味�
 
 ### 5.2 ClamAVの導入・削除
 
-- アプリからHomebrewによるClamAVの導入・削除を扱えるようにします。一般利用者向けに重要な機能です。
+- 初回導入は公式パッケージを検証してOS標準インストーラーを開きます。今後の削除機能ではHomebrew版と公式版の所有元を区別してください。
 - Homebrew自体がない場合は、その状態と準備手順を案内してください。外部インストールスクリプトを無断で実行しないでください。
 - 検査・更新中の削除を防ぎ、変更対象を説明します。依存の自動削除や強制削除をしないでください。
 - 削除時の設定・定義の保持範囲は実際のHomebrewの動作を調べて表示し、Ubuntuと同じだと仮定しないでください。
@@ -177,6 +190,7 @@ python3 -m unittest discover -s tests -v
 - 実際の導入/削除、権限・サービス変更、スケジュール登録、通知許可は担当者へ影響を説明してから行います。
 - 最初の実検査は一時フォルダーの無害なデータを使います。私用のメール、鍵、業務データはテストに使いません。
 - GUIの実画面検証でウィンドウを開いたり入力したりする前に、その操作を担当者へ知らせてください。
+- 利用者の作業を妨げないよう、通常は `scripts/smoke_gui_macos.py --hidden` または生成アプリの `--hidden-smoke-test` を使ってください。表示は抑制し、更新・導入・通知許可・設定変更は模擬処理にします。
 - Ubuntuの独立Wayland検証は維持し、macOSでは一時データ・独自のテスト用ジョブ識別子等で普段の環境と分離してください。
 - UbuntuのGUI検証をMacから実行できない場合は未実施と報告し、Ubuntu担当者に回帰確認を引き継ぎます。
 

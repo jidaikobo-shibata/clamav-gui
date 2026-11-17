@@ -13,11 +13,11 @@ from clam_gui.schedule import read_schedule
 from clam_gui.notifications import definition_status, scan_notification
 
 
-def main():
+def main(argv=None, cancel=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--profile', required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     store = Store(args.data_dir)
     plan = dict(store.profiles()).get(args.profile)
     if plan is None:
@@ -25,9 +25,10 @@ def main():
         return 2
     if not read_schedule(store, args.profile).enabled:
         return 0
-    cancel = threading.Event()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: cancel.set())
+    if cancel is None:
+        cancel = threading.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: cancel.set())
     started = datetime.datetime.now().astimezone()
     output = ''
     try:
@@ -38,6 +39,11 @@ def main():
     finished = datetime.datetime.now().astimezone()
     title, body, urgency = scan_notification(plan.label, status, output, started, finished, definition_status())
     print(status)
+    if sys.platform == 'darwin':
+        from clam_gui.macos_notifications import send
+        if not send(title, body):
+            print('通知を送れませんでした。アプリの通知設定と検査履歴を確認してください。', file=sys.stderr)
+        return 0 if status.startswith('検査完了') else 2
     try:
         notification = subprocess.run(['notify-send', '--app-name=ClamAV GUI',
                         '--urgency=' + urgency, '--expire-time=0', title, body],

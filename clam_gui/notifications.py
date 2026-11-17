@@ -3,9 +3,11 @@ import datetime
 from pathlib import Path
 import re
 from .mailboxes import MAILBOX_NOTE
+from .paths import database_directory
 
 
-def definition_status(directory=Path('/var/lib/clamav'), now=None):
+def definition_status(directory=None, now=None):
+    directory = Path(directory) if directory is not None else database_directory()
     try:
         dates = [path.stat().st_mtime for pattern in ('*.cvd', '*.cld', '*.cud')
                  for path in Path(directory).glob(pattern)]
