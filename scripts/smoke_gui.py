@@ -36,9 +36,16 @@ def check():
     assert app.install_prompt_checked and app.install_prompt is None
     with patch('clam_gui.__main__.shutil.which', return_value=None), patch.object(app, 'package_setup') as setup:
         app.install_prompt_checked = False
+        with patch.object(app.window, 'get_mapped', return_value=False):
+            assert app.offer_install() is True
+            assert app.install_prompt is None
+            assert not app.install_prompt_checked
         app.offer_install()
         assert app.install_prompt.get_modal()
         assert app.install_prompt.get_transient_for() == app.window
+        assert app.install_prompt.get_application() == app
+        assert app.window.get_mapped()
+        assert app.install_prompt.get_destroy_with_parent()
         setup.assert_not_called()
         app.install_prompt.response(Gtk.ResponseType.CANCEL)
         assert app.install_prompt is None

@@ -134,15 +134,22 @@ class Application(Gtk.Application):
         self.refresh_profiles()
         self.state_timer = GLib.timeout_add_seconds(1, self.poll_plans)
         window.present()
-        GLib.idle_add(self.offer_install)
+        self.install_prompt_timer = GLib.timeout_add(250, self.offer_install)
 
     def offer_install(self):
         if self.install_prompt_checked:
             return False
+        if not self.window.get_visible():
+            self.install_prompt_timer = None
+            return False
+        if not self.window.get_mapped():
+            return True
+        self.install_prompt_timer = None
         self.install_prompt_checked = True
         if shutil.which('clamscan'):
             return False
-        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True,
+        dialog = Gtk.MessageDialog(application=self, transient_for=self.window, modal=True,
+            destroy_with_parent=True,
             message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.NONE,
             text='ClamAVが見つかりません',
             secondary_text='検査を行うには、ClamAV本体のインストールが必要です。\n'
@@ -1299,6 +1306,9 @@ class Application(Gtk.Application):
         window.present()
 
     def do_shutdown(self):
+        if getattr(self, 'install_prompt_timer', None):
+            GLib.source_remove(self.install_prompt_timer)
+            self.install_prompt_timer = None
         if getattr(self, 'state_timer', None):
             GLib.source_remove(self.state_timer)
             self.state_timer = None
