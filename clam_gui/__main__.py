@@ -7,7 +7,7 @@ import gi
 
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gio, GLib, Gtk, Pango
-from .core import Store, Plan, engine_status, scan
+from .core import Store, Plan, engine_status, scan, record_scan_failure
 from .options import OPTIONS, supported_options, standard_defaults, option_arguments, LIMITS, limit_arguments
 from .schedule import Schedule, Scheduler, read_schedule
 from .runtime import activities, request_stop
@@ -1013,8 +1013,13 @@ class Application(Gtk.Application):
         return read
 
     def confirm(self, plan, key=None):
-        plan = self.store.effective_plan(plan)
         if self.busy:
+            return
+        self.refresh_profiles(key)
+        try:
+            plan = self.store.effective_plan(plan)
+        except Exception as error:
+            self.finished(*record_scan_failure(self.store, plan, error, key))
             return
         dialog = Gtk.MessageDialog(transient_for=self.operation_parent(), modal=True,
             message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
@@ -1037,7 +1042,7 @@ class Application(Gtk.Application):
         try:
             status, output = scan(target, self.store, self.cancel, profile_id=key)
         except Exception as error:
-            status, output = '検査不完了', str(error)
+            status, output = record_scan_failure(self.store, target, error, key)
         GLib.idle_add(self.finished, status, output)
 
     def finished(self, status, output):
@@ -1045,6 +1050,7 @@ class Application(Gtk.Application):
         self.scan_key = None
         self.set_controls(True)
         self.history(None)
+        self.history_list.select_row(self.history_list.get_row_at_index(0))
         self.show_notice(status)
         notification = Gio.Notification.new('ClamAV検査終了')
         from .mailboxes import MAILBOX_NOTE

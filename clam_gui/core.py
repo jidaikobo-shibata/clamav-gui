@@ -314,6 +314,21 @@ def summarize(code, output, cancelled=False):
     return '\n'.join([title] + details)
 
 
+def record_scan_failure(store, plan, error, profile_id=None, started=None):
+    """Preserve failures that happen before scan() can write its normal result."""
+    started = started or datetime.datetime.now().astimezone().isoformat(timespec='seconds')
+    reason = str(error).strip() or type(error).__name__
+    status = '検査不完了：' + reason
+    output = type(error).__name__ + ': ' + reason
+    try:
+        store.save(started, plan.describe(), status, output, profile_id)
+    except Exception as storage_error:
+        detail = str(storage_error).strip() or type(storage_error).__name__
+        status += '\n検査履歴も保存できませんでした：' + detail
+        output += '\n履歴保存エラー：' + detail
+    return status, output
+
+
 def scan(target, store, cancel=None, lock_path=None, profile_id=None):
     plan = target if isinstance(target, Plan) else Plan('フォルダー検査', [Path(target).absolute()], [])
     plan = store.effective_plan(plan)

@@ -156,6 +156,26 @@ def check():
         assert not app.plan_rows[key]['switch'].get_active()
         assert '変更できませんでした' in app.manager_notice.get_text()
     app.close_manager()
+    # A manual preflight failure must be visible and stored under the executed plan.
+    blocked = Plan('開始失敗の試験', [str(app.store.path.parent)], [])
+    blocked_key = app.store.save_profile(blocked)
+    reason = '別の検査が実行中です。完了後に再実行してください。'
+    with patch('clam_gui.__main__.scan', side_effect=ValueError(reason)), patch.object(app, 'send_notification') as notify:
+        app.confirm(blocked, blocked_key)
+        dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+        dialog.response(Gtk.ResponseType.OK)
+        deadline = time.monotonic() + 3
+        while app.busy and time.monotonic() < deadline:
+            GLib.MainContext.default().iteration(False)
+            time.sleep(.01)
+        assert not app.busy
+        assert reason in app.notice.get_text()
+        assert app.selected_profile()[0] == blocked_key
+        assert reason in app.log_entries[0].status
+        buffer = app.result.get_buffer()
+        assert reason in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+        assert len(app.store.history_entries(blocked_key, blocked)) == 1
+        notify.assert_called_once()
     # Exercise editor persistence and recovery without registering actual timers.
     from clam_gui.schedule import save_schedule, read_schedule
     import time
