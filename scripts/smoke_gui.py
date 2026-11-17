@@ -126,6 +126,57 @@ def check():
     frequency.set_selected(0)
     schedules[0].destroy()
     app.close_manager()
+    # Exercise editor persistence and recovery without registering actual timers.
+    from clam_gui.schedule import save_schedule, read_schedule
+    import time
+    before = len(app.store.profiles())
+    app.edit_profile(plan=Plan('予定つき試験', [str(app.store.path.parent)], []))
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査対象の設定')
+    fields = list(descendants(editor))
+    enabled = next(w for w in fields if isinstance(w, Gtk.CheckButton) and w.get_label() == '定期検査を有効にする')
+    assert not enabled.get_active()
+    enabled.set_active(True)
+    frequency = next(w for w in fields if isinstance(w, Gtk.DropDown))
+    frequency.set_selected(4)
+    interval = next(w for w in fields if isinstance(w, Gtk.SpinButton) and w.get_parent().get_first_child().get_text() == '間隔（1〜1440分）')
+    assert interval.get_parent().get_visible()
+    interval.set_value(7)
+    save_editor = next(w for w in fields if isinstance(w, Gtk.Button) and w.get_label() == '対象設定を保存')
+    def confirmation(answer):
+        dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+        dialog.response(answer)
+    save_editor.emit('clicked')
+    confirmation(Gtk.ResponseType.CANCEL)
+    assert len(app.store.profiles()) == before
+    def settle():
+        deadline = time.monotonic() + 3
+        while app.busy and time.monotonic() < deadline:
+            GLib.MainContext.default().iteration(False)
+            time.sleep(.01)
+        assert not app.busy
+    with patch('clam_gui.__main__.Scheduler') as manager:
+        manager.return_value.apply.side_effect = RuntimeError('mock registration failure')
+        save_editor.emit('clicked')
+        confirmation(Gtk.ResponseType.OK)
+        settle()
+        assert len(app.store.profiles()) == before + 1
+        assert editor.get_visible()
+        assert any(isinstance(w, Gtk.Label) and '対象設定は保存しましたが' in w.get_text() for w in fields)
+        new_key = next(k for k, p in app.store.profiles() if p.label == '予定つき試験')
+        manager.return_value.apply.side_effect = lambda key, schedule: save_schedule(app.store, key, schedule)
+        save_editor.emit('clicked')
+        confirmation(Gtk.ResponseType.OK)
+        settle()
+        assert len(app.store.profiles()) == before + 1
+        assert not editor.get_visible()
+        assert read_schedule(app.store, new_key).interval_minutes == 7
+        manager.return_value.apply.reset_mock()
+        app.edit_profile(new_key, dict(app.store.profiles())[new_key])
+        editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査対象の設定')
+        fields = list(descendants(editor))
+        assert next(w for w in fields if isinstance(w, Gtk.CheckButton)).get_active()
+        next(w for w in fields if isinstance(w, Gtk.Button) and w.get_label() == '対象設定を保存').emit('clicked')
+        manager.return_value.apply.assert_not_called()
     app.preferences()
     preferences = [w for w in Gtk.Window.list_toplevels() if w.get_title() == '環境設定']
     assert len(preferences) == 1

@@ -728,24 +728,93 @@ class Application(Gtk.Application):
             button = Gtk.Button(label=label)
             button.connect('clicked', lambda _, d=directory, a=action: pick(a, lambda p: add(p, d)))
             exclusion_actions.append(button)
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL, margin_top=8, margin_bottom=8))
+        heading = Gtk.Label(label='スケジュール', xalign=0)
+        heading.add_css_class('heading')
+        box.append(heading)
+        saved_schedule = read_schedule(self.store, key) if key else Schedule()
+        read_fields = self.schedule_fields(box, saved_schedule, plan)
+        state = {'running': False}
+        editor.connect('close-request', lambda _: state['running'])
         error_label = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.append(error_label)
         save = Gtk.Button(label='対象設定を保存')
         save.add_css_class('suggested-action')
         def save_profile(_button):
+            nonlocal key
+            if state['running'] or self.busy:
+                return
             try:
+                from .core import validate_profile
                 new = Plan(name.get_text().strip(), [root.get_text()],
                            [p for p, directory in exclusions if not directory], plan.phishing,
                            [p for p, directory in exclusions if directory], plan.requires_admin)
-                new_key = self.store.save_profile(new, key)
-                if self.manager:
-                    self.manager_key = new_key
-                    self.refresh_profiles()
-                else:
-                    self.refresh_profiles(new_key)
-                editor.destroy()
+                validate_profile(new)
+                schedule = read_fields()
+                schedule.calendar()
+                if schedule.enabled and new.requires_admin:
+                    raise ValueError('管理者権限が必要な対象は定期実行できません。')
             except (ValueError, OSError) as error:
                 error_label.set_text(str(error))
+                return
+            def refresh_saved():
+                if self.manager:
+                    self.manager_key = key
+                    self.refresh_profiles()
+                else:
+                    self.refresh_profiles(key)
+            changed = schedule != saved_schedule
+            if not changed:
+                try:
+                    key = self.store.save_profile(new, key)
+                    refresh_saved()
+                    editor.destroy()
+                except (ValueError, OSError) as error:
+                    error_label.set_text(str(error))
+                return
+            detail = new.describe() + '\n\n' + schedule.describe()
+            detail += ('\n\n対象設定と予定を保存します。有効化時は検査がすぐ始まる場合があります。'
+                       '\n無効化しても実行中の検査は完了まで続けます。')
+            dialog = Gtk.MessageDialog(transient_for=editor, modal=True,
+                message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
+                text='対象設定とこの予定を保存しますか？', secondary_text=detail)
+            def response(d, answer):
+                d.destroy()
+                if answer != Gtk.ResponseType.OK or self.busy:
+                    return
+                state['running'] = True
+                self.busy = True
+                box.set_sensitive(False)
+                self.set_controls(False)
+                error_label.set_text('対象設定と予定を保存しています…')
+                def worker():
+                    nonlocal key
+                    profile_saved = False
+                    error = None
+                    try:
+                        key = self.store.save_profile(new, key)
+                        profile_saved = True
+                        Scheduler(self.store).apply(key, schedule)
+                    except Exception as failure:
+                        prefix = ('対象設定は保存しましたが、予定を登録できませんでした：'
+                                  if profile_saved else '対象設定を保存できませんでした：')
+                        error = prefix + str(failure)
+                    def finished():
+                        state['running'] = False
+                        self.busy = False
+                        self.set_controls(True)
+                        box.set_sensitive(True)
+                        if profile_saved:
+                            refresh_saved()
+                        if error:
+                            error_label.set_text(error + '\n内容を確認して再度保存してください。')
+                        else:
+                            editor.destroy()
+                        return False
+                    GLib.idle_add(finished)
+                threading.Thread(target=worker, daemon=True).start()
+            dialog.connect('response', response)
+            dialog.present()
         save.connect('clicked', save_profile)
         save_actions = Gtk.Box(spacing=8, homogeneous=True)
         cancel = Gtk.Button(label='キャンセル')
@@ -755,18 +824,7 @@ class Application(Gtk.Application):
         box.append(save_actions)
         editor.present()
 
-    def edit_schedule(self):
-        selected = self.operation_profile()
-        if not selected or self.busy:
-            return
-        key, plan = selected
-        saved = read_schedule(self.store, key)
-        window = Gtk.Window(application=self, title='スケジュール設定', transient_for=self.operation_parent(), modal=True)
-        window.set_default_size(600, 450)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                      margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
-        window.set_child(box)
-        box.append(Gtk.Label(label=plan.label, xalign=0, wrap=True))
+    def schedule_fields(self, box, saved, plan):
         enabled = Gtk.CheckButton(label='定期検査を有効にする', active=saved.enabled)
         enabled.set_sensitive(not plan.requires_admin)
         box.append(enabled)
@@ -810,14 +868,31 @@ class Application(Gtk.Application):
             hint.set_text(text + '\n既存cronと同じ対象の予定を重複させないでください。')
         frequency.connect('notify::selected', frequency_changed)
         frequency_changed()
+        def read():
+            return Schedule(enabled.get_active(), ['daily', 'weekly', 'monthly', 'hourly', 'interval'][frequency.get_selected()],
+                            hour.get_value_as_int(), minute.get_value_as_int(),
+                            weekday.get_selected(), monthday.get_value_as_int(), interval.get_value_as_int())
+        return read
+
+    def edit_schedule(self):
+        selected = self.operation_profile()
+        if not selected or self.busy:
+            return
+        key, plan = selected
+        saved = read_schedule(self.store, key)
+        window = Gtk.Window(application=self, title='スケジュール設定', transient_for=self.operation_parent(), modal=True)
+        window.set_default_size(600, 450)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                      margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
+        window.set_child(box)
+        box.append(Gtk.Label(label=plan.label, xalign=0, wrap=True))
+        read_fields = self.schedule_fields(box, saved, plan)
         message = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.append(message)
         apply = Gtk.Button(label='登録内容を確認')
         box.append(apply)
         def prepare(_button):
-            schedule = Schedule(enabled.get_active(), ['daily', 'weekly', 'monthly', 'hourly', 'interval'][frequency.get_selected()],
-                                hour.get_value_as_int(), minute.get_value_as_int(),
-                                weekday.get_selected(), monthday.get_value_as_int(), interval.get_value_as_int())
+            schedule = read_fields()
             manager = Scheduler(self.store)
             try:
                 schedule.calendar()
