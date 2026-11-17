@@ -22,11 +22,31 @@ from clam_gui.mailboxes import MAILBOX_NOTE, mailbox_guidance
 app = Application()
 def check():
     assert app.menu_model.get_n_items() == 3
-    menu = app.menu_model.get_item_link(1, Gio.MENU_LINK_SUBMENU)
+    menu = app.menu_model.get_item_link(0, Gio.MENU_LINK_SECTION)
     assert menu.get_n_items() == 2
+    actions = []
+    for index in range(3):
+        section = app.menu_model.get_item_link(index, Gio.MENU_LINK_SECTION)
+        for item in range(section.get_n_items()):
+            assert section.get_item_link(item, Gio.MENU_LINK_SUBMENU) is None
+            actions.append(section.get_item_attribute_value(item, 'action', None).get_string())
+    assert actions == ['app.new-target', 'app.manage-targets', 'app.preferences',
+                       'app.package-setup', 'app.shortcuts', 'app.about']
+    assert isinstance(app.get_active_window().get_titlebar(), Gtk.HeaderBar)
+    assert app.main_menu.get_icon_name() == 'open-menu-symbolic'
+    assert app.main_menu.get_tooltip_text() == 'メインメニュー'
     assert app.get_accels_for_action('app.quit') == ['<Control>q']
-    file_menu = app.menu_model.get_item_link(0, Gio.MENU_LINK_SUBMENU)
-    assert file_menu.get_item_attribute_value(0, 'action', None).get_string() == 'app.quit'
+    assert app.get_accels_for_action('app.open-menu') == ['F10']
+    app.activate_action('open-menu', None)
+    app.main_menu.popdown()
+    app.activate_action('shortcuts', None)
+    assert app.shortcuts_window.get_modal()
+    app.shortcuts_window.close()
+    assert app.shortcuts_window is None
+    app.activate_action('about', None)
+    assert app.about_window.get_program_name() == 'ClamAV GUI'
+    app.about_window.close()
+    assert app.about_window is None
     from unittest.mock import patch
     with patch.object(app, 'quit') as quit_mock, patch.object(app, 'show_notice') as notice:
         app.busy = True

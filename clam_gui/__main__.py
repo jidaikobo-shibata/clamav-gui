@@ -42,19 +42,31 @@ class Application(Gtk.Application):
         action('package-setup', self.package_setup)
         action('quit', self.request_quit)
         self.set_accels_for_action('app.quit', ['<Control>q'])
+        action('shortcuts', self.show_shortcuts)
+        action('about', self.show_about)
+        self.set_accels_for_action('app.preferences', ['<Control>comma'])
+        self.set_accels_for_action('app.shortcuts', ['<Control>question'])
         self.menu_model = Gio.Menu()
-        file_menu = Gio.Menu()
-        file_menu.append('終了(_Q)', 'app.quit')
-        self.menu_model.append_submenu('ファイル(_F)', file_menu)
         targets = Gio.Menu()
-        targets.append('対象を追加...', 'app.new-target')
-        targets.append('対象を管理...', 'app.manage-targets')
-        self.menu_model.append_submenu('対象管理', targets)
+        targets.append('対象を追加…(_N)', 'app.new-target')
+        targets.append('対象を管理…(_M)', 'app.manage-targets')
+        self.menu_model.append_section(None, targets)
         environment = Gio.Menu()
-        environment.append('検査設定...', 'app.preferences')
-        environment.append('ClamAVの管理...', 'app.package-setup')
-        self.menu_model.append_submenu('環境設定', environment)
-        box.append(Gtk.PopoverMenuBar.new_from_model(self.menu_model))
+        environment.append('検査設定…(_P)', 'app.preferences')
+        environment.append('ClamAVの管理…(_C)', 'app.package-setup')
+        self.menu_model.append_section(None, environment)
+        information = Gio.Menu()
+        information.append('キーボードショートカット(_K)', 'app.shortcuts')
+        information.append('ClamAV GUIについて(_A)', 'app.about')
+        self.menu_model.append_section(None, information)
+        self.header = Gtk.HeaderBar()
+        self.main_menu = Gtk.MenuButton(icon_name='open-menu-symbolic', menu_model=self.menu_model)
+        self.main_menu.set_tooltip_text('メインメニュー')
+        self.main_menu.update_property([Gtk.AccessibleProperty.LABEL], ['メインメニュー'])
+        self.header.pack_end(self.main_menu)
+        window.set_titlebar(self.header)
+        self.set_accels_for_action('app.open-menu', ['F10'])
+        action('open-menu', self.main_menu.popup)
         selector = Gtk.Box(spacing=12)
         selector.append(Gtk.Label(label='対象', xalign=0))
         self.profile_names = Gtk.StringList.new([])
@@ -929,6 +941,57 @@ class Application(Gtk.Application):
         entry = self.log_entries[row.get_index()]
         self.result.get_buffer().set_text(entry.date_label() + '\n' + entry.status + '\n\n' +
                                           entry.target + '\n\n' + entry.output)
+
+    def show_shortcuts(self):
+        window = getattr(self, 'shortcuts_window', None)
+        if window:
+            window.present()
+            return
+        window = Gtk.Window(application=self, title='キーボードショートカット',
+                            transient_for=self.operation_parent(), modal=True)
+        self.shortcuts_window = window
+        window.set_default_size(440, 280)
+        header = Gtk.HeaderBar()
+        window.set_titlebar(header)
+        grid = Gtk.Grid(column_spacing=32, row_spacing=18, margin_top=24,
+                        margin_bottom=24, margin_start=24, margin_end=24)
+        for row, (title, accelerator) in enumerate([
+                ('アプリケーションを終了', '<Control>q'),
+                ('メインメニューを開く', 'F10'),
+                ('検査設定を開く', '<Control>comma'),
+                ('ショートカットを表示', '<Control>question'),
+                ('この一覧を閉じる', 'Escape')]):
+            grid.attach(Gtk.Label(label=title, xalign=0, hexpand=True), 0, row, 1, 1)
+            grid.attach(Gtk.ShortcutLabel(accelerator=accelerator), 1, row, 1, 1)
+        window.set_child(grid)
+        controller = Gtk.ShortcutController()
+        controller.add_shortcut(Gtk.Shortcut.new(
+            Gtk.ShortcutTrigger.parse_string('Escape'),
+            Gtk.CallbackAction.new(lambda *_: (window.close(), True)[1])))
+        window.add_controller(controller)
+        def closed(*_):
+            self.shortcuts_window = None
+            return False
+        window.connect('close-request', closed)
+        window.present()
+
+    def show_about(self):
+        window = getattr(self, 'about_window', None)
+        if window:
+            window.present()
+            return
+        window = Gtk.AboutDialog(application=self, transient_for=self.operation_parent(),
+                                 modal=True, program_name='ClamAV GUI', version='開発版',
+                                 comments='ClamAVの検査対象・定期実行・検査履歴を管理します。',
+                                 website='https://github.com/jidaikobo-shibata/clamav-gui',
+                                 website_label='プロジェクトのページ',
+                                 license_type=Gtk.License.CUSTOM, license='WTFPL Version 2')
+        self.about_window = window
+        def closed(*_):
+            self.about_window = None
+            return False
+        window.connect('close-request', closed)
+        window.present()
 
     def request_quit(self):
         if not self.on_close(None):
