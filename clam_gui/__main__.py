@@ -26,7 +26,7 @@ class Application(Gtk.Application):
         window.set_default_size(800, 600)
         window.connect('close-request', self.on_close)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                      margin_bottom=12, margin_start=12, margin_end=12)
+                      margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
         window.set_child(box)
         def action(name, callback):
             item = Gio.SimpleAction.new(name, None)
