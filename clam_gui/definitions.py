@@ -1,5 +1,6 @@
 """Request updates from Ubuntu's existing FreshClam service and observe its journal."""
 import datetime
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
@@ -26,6 +27,76 @@ def definition_update_label(directory=Path('/var/lib/clamav')):
         return f'定義ファイル更新：{updated:%Y/%m/%d %H:%M}'
     except (OSError, ValueError, OverflowError):
         return '定義ファイル更新：日時を確認できません'
+
+
+@dataclass(frozen=True)
+class AutoUpdateState:
+    enabled: bool | None = None
+    running: bool | None = None
+    manageable: bool = False
+    checks: int | None = None
+    detail: str = ''
+
+    def label(self):
+        if self.enabled is None:
+            return '自動更新：確認できません'
+        setting = '有効' if self.enabled else '無効'
+        runtime = (('稼働中' if self.enabled else '一時稼働中') if self.running is True else
+                   '停止中' if self.running is False else '稼働状態不明')
+        return f'自動更新：{setting}（{runtime}）'
+
+    def frequency(self):
+        if self.checks:
+            hours = 24 / self.checks
+            interval = f'約{hours:g}時間ごと' if hours >= 1 else f'約{60 * hours:g}分ごと'
+            return f'確認頻度：1日{self.checks}回（{interval}）'
+        return '確認頻度：確認できません'
+
+
+class AutoUpdateService:
+    def __init__(self, run=None, config=Path('/etc/clamav/freshclam.conf')):
+        self.run = run or subprocess.run
+        self.config = Path(config)
+
+    def status(self):
+        result = self.run(['/usr/bin/systemctl', 'show', SERVICE,
+                           '--property=LoadState,UnitFileState,ActiveState'],
+                          capture_output=True, text=True, timeout=10)
+        if result.returncode:
+            raise ValueError('自動更新サービスの状態を確認できません。' + result.stderr.strip())
+        values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        loaded, unit, active = (values.get(key) for key in ('LoadState', 'UnitFileState', 'ActiveState'))
+        checks = None
+        try:
+            for line in self.config.read_text().splitlines():
+                match = re.fullmatch(r'Checks\s+(\d+)', line.split('#', 1)[0].strip())
+                if match and int(match[1]) > 0:
+                    checks = int(match[1])
+        except OSError:
+            pass
+        manageable = loaded == 'loaded' and unit in ('enabled', 'disabled') and active in ('active', 'inactive', 'failed')
+        enabled = unit == 'enabled' if unit in ('enabled', 'disabled') else None
+        running = active == 'active' if active in ('active', 'inactive', 'failed') else None
+        detail = '' if manageable else '未導入・マスク・独自設定などのため、この画面では切り替えできません。'
+        return AutoUpdateState(enabled, running, manageable, checks, detail)
+
+    def set_enabled(self, enabled):
+        if type(enabled) is not bool:
+            raise ValueError('自動更新の設定が不正です。')
+        if not self.status().manageable:
+            raise ValueError('このサービス設定はアプリから変更できません。')
+        command = ['/usr/bin/pkexec', '/usr/bin/systemctl',
+                   'enable' if enabled else 'disable', '--now', SERVICE]
+        result = self.run(command, capture_output=True, text=True, timeout=180)
+        if result.returncode in (126, 127):
+            return '設定変更をキャンセルしました。', self.status()
+        if result.returncode:
+            raise ValueError('自動更新の設定を変更できませんでした。' + result.stdout + result.stderr)
+        state = self.status()
+        if state.enabled != enabled or state.running != enabled:
+            raise ValueError('設定変更後の状態が予定と一致しません。現在の状態を確認してください。')
+        return ('自動更新を有効にしました。アプリを閉じても更新を確認します。' if enabled else
+                '自動更新を無効にしました。他のClamAV連携の定義も自動更新されなくなります。'), state
 
 
 class UpdateTracker:
@@ -101,7 +172,29 @@ class DefinitionUpdater:
                        for path in (self.database/(name+'.cvd'), self.database/(name+'.cld')))
                    for name in expected)
 
-    def update(self, cancel=None, progress=None, timeout=1800):
+    def update(self, cancel=None, progress=None, timeout=1800, restore_stopped=False):
+        self._temporary_started = False
+        temporary_stopped = False
+        try:
+            result, log = self._update(cancel, progress, timeout)
+        finally:
+            if restore_stopped and self._temporary_started:
+                current = AutoUpdateService(self.run, self.config).status()
+                if current.enabled is None or current.running is None:
+                    raise ValueError('一時起動したサービスの状態を確認できません。自動更新の設定を確認してください。')
+                if current.enabled is False and current.running:
+                    stopped = self.command(['/usr/bin/pkexec', '/usr/bin/systemctl', 'stop', SERVICE], timeout=180)
+                    if stopped.returncode or AutoUpdateService(self.run, self.config).status().running is not False:
+                        raise ValueError('一時起動した更新サービスを停止できませんでした。自動更新の現在の状態を確認してください。')
+                    temporary_stopped = True
+        if temporary_stopped:
+            result = result.replace('サービスは停止していません。', '')
+            if '監視を終了' in result:
+                result = '監視を終了しました。'
+            result += '\n一時起動した更新サービスは停止しました。自動更新は無効のままです。'
+        return result, log
+
+    def _update(self, cancel=None, progress=None, timeout=1800):
         cancel = cancel or threading.Event()
         progress = progress or (lambda text: None)
         expected = self.expected()
@@ -133,6 +226,7 @@ class DefinitionUpdater:
                 return '更新依頼をキャンセルしました。', result.stderr
             if result.returncode:
                 raise ValueError('更新を依頼できませんでした。\n' + result.stdout + result.stderr)
+            self._temporary_started = not active
             log = '更新サービスへ取得・更新を依頼しました。\n'
         progress(log)
         deadline = self.clock() + timeout

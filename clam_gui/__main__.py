@@ -2,6 +2,7 @@
 from dataclasses import replace
 from pathlib import Path
 import threading
+import time
 import shutil
 import gi
 
@@ -11,7 +12,7 @@ from .core import Store, Plan, engine_status, scan, record_scan_failure
 from .options import OPTIONS, supported_options, standard_defaults, option_arguments, LIMITS, limit_arguments
 from .schedule import Schedule, Scheduler, read_schedule
 from .runtime import activities, request_stop
-from .definitions import definition_update_label
+from .definitions import definition_update_label, AutoUpdateService, AutoUpdateState
 
 
 class Application(Gtk.Application):
@@ -23,6 +24,10 @@ class Application(Gtk.Application):
         self.scan_key = None
         self.schedule_busy = False
         self.active_runs = []
+        self.auto_generation = 0
+        self.auto_status = None
+        self.auto_checking = False
+        self.auto_checked_at = None
 
     def do_activate(self):
         if self.get_active_window():
@@ -111,7 +116,7 @@ class Application(Gtk.Application):
         self.definition_label = Gtk.Label(xalign=0, wrap=True, hexpand=True)
         self.definition_label.set_tooltip_text('端末にある定義ファイルのうち、最後に書き換わった日時です。更新の確認だけを行った時刻とは異なります。')
         definitions.append(self.definition_label)
-        self.definition_button = Gtk.Button(label='定義ファイルを更新…')
+        self.definition_button = Gtk.Button(label='自動更新：確認中…', tooltip_text='定義ファイルの自動更新を設定')
         self.definition_button.connect('clicked', lambda _: self.package_setup(update_only=True))
         definitions.append(self.definition_button)
         box.append(definitions)
@@ -217,6 +222,7 @@ class Application(Gtk.Application):
         self.poll_plans()
 
     def poll_plans(self):
+        self.refresh_auto_status()
         self.definition_label.set_text(definition_update_label())
         self.definition_button.set_sensitive(not self.busy and not self.schedule_busy)
         self.new_action.set_enabled(not self.busy and not self.schedule_busy)
@@ -344,13 +350,41 @@ class Application(Gtk.Application):
     def show_notice(self, text):
         self.notice.set_text(text)
 
-    def package_setup(self, manager=None, updater=None, update_only=False):
+    def show_auto_status(self, status):
+        self.auto_generation += 1
+        self.auto_status = status
+        self.definition_button.set_label(status.label() + '…')
+        self.definition_button.set_tooltip_text('定義ファイルの更新設定を開きます。\n' + status.frequency() +
+                                               ('\n' + status.detail if status.detail else ''))
+
+    def refresh_auto_status(self, force=False):
+        if self.auto_checking or (not force and self.auto_checked_at is not None and
+                                 time.monotonic() - self.auto_checked_at < 15):
+            return
+        self.auto_checking = True
+        generation = self.auto_generation
+        def worker():
+            try:
+                status = AutoUpdateService().status()
+            except Exception as error:
+                status = AutoUpdateState(detail=str(error))
+            def finished():
+                self.auto_checking = False
+                self.auto_checked_at = time.monotonic()
+                if generation == self.auto_generation:
+                    self.show_auto_status(status)
+                return False
+            GLib.idle_add(finished)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def package_setup(self, manager=None, updater=None, update_only=False, auto_manager=None):
         from .packages import AptManager, PACKAGES
         from .notifications import definition_status
         manager = manager or AptManager()
         from .definitions import DefinitionUpdater
         updater = updater or DefinitionUpdater()
-        window = Gtk.Window(application=self, title='定義ファイルの更新' if update_only else 'ClamAVの管理',
+        auto_manager = auto_manager or AutoUpdateService()
+        window = Gtk.Window(application=self, title='定義ファイルの更新設定' if update_only else 'ClamAVの管理',
                             transient_for=self.operation_parent(), modal=True)
         window.set_default_size(720, 580)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
@@ -371,8 +405,16 @@ class Application(Gtk.Application):
         controls.append(remove)
         box.append(controls)
         controls.set_visible(not update_only)
+        auto_row = Gtk.Box(spacing=12)
+        auto_row.append(Gtk.Label(label='定義ファイルの自動更新', xalign=0, hexpand=True))
+        auto_switch = Gtk.Switch(valign=Gtk.Align.CENTER, sensitive=False)
+        auto_switch.update_property([Gtk.AccessibleProperty.LABEL], ['定義ファイルの自動更新'])
+        auto_row.append(auto_switch)
+        box.append(auto_row)
+        auto_details = Gtk.Label(label='自動更新の状態を確認しています…', xalign=0, wrap=True)
+        box.append(auto_details)
         update_controls = Gtk.Box(spacing=8)
-        update = Gtk.Button(label='定義ファイルを取得・更新', hexpand=True)
+        update = Gtk.Button(label='今すぐ更新を確認', hexpand=True)
         stop_monitor = Gtk.Button(label='監視を終了', sensitive=False)
         update_controls.append(update)
         update_controls.append(stop_monitor)
@@ -391,11 +433,12 @@ class Application(Gtk.Application):
         close = Gtk.Button(label='閉じる')
         close.connect('clicked', lambda _: window.close())
         box.append(close)
-        state = {'running': False, 'closed': False, 'installed': {}, 'updating': False, 'cancel': threading.Event()}
+        state = {'running': False, 'closed': False, 'installed': {}, 'updating': False, 'cancel': threading.Event(), 'auto': None, 'setting_switch': False, 'temporary_update': False}
         def close_request(_window):
             if state['updating']:
                 state['cancel'].set()
-                message.set_text('監視を終了しています。更新サービスは停止しません。')
+                message.set_text('更新を中断し、一時起動したサービスを停止しています…' if state['temporary_update'] else
+                                 '監視を終了しています。更新サービスは停止しません。')
                 return True
             if state['running']:
                 message.set_text('処理中です。完了までお待ちください。OSのパッケージ処理は途中で終了しません。')
@@ -407,14 +450,21 @@ class Application(Gtk.Application):
             ready = not state['running'] and not self.busy
             install.set_sensitive(ready and len(state['installed']) < len(PACKAGES))
             remove.set_sensitive(ready and bool(state['installed']))
-            update.set_sensitive(ready and 'clamav-freshclam' in state['installed'])
+            update.set_sensitive(ready and 'clamav-freshclam' in state['installed'] and
+                                 bool(state['auto'] and state['auto'].manageable))
             refresh.set_sensitive(ready)
+            auto_switch.set_sensitive(ready and bool(state['auto'] and state['auto'].manageable))
         def check_state():
             install.set_sensitive(False)
             remove.set_sensitive(False)
             update.set_sensitive(False)
             refresh.set_sensitive(False)
+            auto_switch.set_sensitive(False)
             def worker():
+                try:
+                    auto_state = auto_manager.status()
+                except Exception as auto_error:
+                    auto_state = AutoUpdateState(detail=str(auto_error))
                 try:
                     installed = manager.status()
                     lines = [package + ': ' + installed.get(package, '未導入') for package in PACKAGES]
@@ -429,6 +479,14 @@ class Application(Gtk.Application):
                     if state['closed']:
                         return False
                     state['installed'] = installed
+                    state['auto'] = auto_state
+                    state['setting_switch'] = True
+                    auto_switch.set_active(auto_state.enabled is True)
+                    auto_switch.set_state(auto_state.enabled is True)
+                    state['setting_switch'] = False
+                    auto_details.set_text(auto_state.label() + '\n' + auto_state.frequency() +
+                                          ('\n' + auto_state.detail if auto_state.detail else ''))
+                    self.show_auto_status(auto_state)
                     status.set_text(text)
                     if error is None:
                         buttons()
@@ -444,6 +502,8 @@ class Application(Gtk.Application):
         def release():
             state['running'] = False
             state['updating'] = False
+            state['temporary_update'] = False
+            stop_monitor.set_label('監視を終了')
             stop_monitor.set_sensitive(False)
             self.busy = False
             self.set_controls(True)
@@ -461,7 +521,7 @@ class Application(Gtk.Application):
                     expected = len(after) == len(PACKAGES) if plan.action == 'install' else not after
                     if code == 0 and expected:
                         install_succeeded = plan.action == 'install'
-                        result = 'インストールが完了しました。「定義ファイルを取得・更新」で更新状態を確認してください。' if plan.action == 'install' else 'アンインストールが完了しました。'
+                        result = 'インストールが完了しました。「今すぐ更新を確認」で更新状態を確認してください。' if plan.action == 'install' else 'アンインストールが完了しました。'
                     else:
                         result = '処理が完了していません。管理者認証と下の詳細・現在の状態を確認してください。'
                 except Exception as error:
@@ -472,7 +532,7 @@ class Application(Gtk.Application):
                     release()
                     check_state()
                     if install_succeeded:
-                        begin_update()
+                        message.set_text(result + '\n自動更新の状態を確認し、無効ならスイッチで有効にしてください。')
                     return False
                 GLib.idle_add(finished)
             threading.Thread(target=worker, daemon=True).start()
@@ -537,22 +597,67 @@ class Application(Gtk.Application):
                     return False
                 GLib.idle_add(finished)
             threading.Thread(target=worker, daemon=True).start()
+        def change_auto(_switch, enabled):
+            if state['setting_switch']:
+                return True
+            if state['running'] or self.busy or not state['auto'] or not state['auto'].manageable:
+                check_state()
+                return True
+            if state['auto'].enabled == enabled and state['auto'].running == enabled:
+                return True
+            detail = ('OS起動時の自動起動を有効にして、更新サービスを開始します。アプリを閉じても動きます。'
+                      if enabled else '更新サービスを停止し、OS起動時の自動起動も無効にします。取得中の処理があれば中断します。')
+            detail += '\nThunderbird連携など、この端末でClamAVを使う他の機能にも影響します。管理者認証が必要な場合があります。'
+            dialog = Gtk.MessageDialog(transient_for=window, modal=True, message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.OK_CANCEL, text='自動更新を有効にしますか？' if enabled else '自動更新を無効にしますか？',
+                secondary_text=detail)
+            def response(d, answer):
+                d.destroy()
+                if answer != Gtk.ResponseType.OK or self.busy:
+                    check_state()
+                    return
+                self.busy = True
+                state['running'] = True
+                self.set_controls(False)
+                buttons()
+                progress.start()
+                message.set_text('自動更新の設定を変更しています…')
+                def worker():
+                    try:
+                        result, _ = auto_manager.set_enabled(enabled)
+                    except Exception as error:
+                        result = '自動更新の設定を変更できませんでした：' + str(error)
+                    def finished():
+                        message.set_text(result)
+                        release()
+                        check_state()
+                        return False
+                    GLib.idle_add(finished)
+                threading.Thread(target=worker, daemon=True).start()
+            dialog.connect('response', response)
+            dialog.present()
+            return True
+        auto_switch.connect('state-set', change_auto)
         def begin_update():
             if self.busy:
                 message.set_text('別の処理が実行中です。完了後に再実行してください。')
                 return
+            temporary = bool(state['auto'] and state['auto'].enabled is False and state['auto'].running is False)
             dialog = Gtk.MessageDialog(application=self, transient_for=window, modal=True,
                 message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
                 text='定義ファイルを取得・更新しますか？',
                 secondary_text='自動更新サービスを利用して、公式の更新先へ接続します。\n'
-                    '停止中の場合は開始します。稼働中のサービスを止めたり、別のFreshClamを起動したりしません。\n'
-                    '管理者認証が必要な場合があります。取得中の場合はその処理を監視します。')
+                    '既存のサービスを使い、別のFreshClamを並行起動しません。\n'
+                    '管理者認証が必要な場合があります。取得中の場合はその処理を監視します。' +
+                    ('\n自動更新は無効のまま、一時的にサービスを起動します。完了・監視終了・エラー時に停止します。' if temporary else ''))
             def response(d, answer):
                 d.destroy()
                 if answer != Gtk.ResponseType.OK or self.busy:
                     return
                 self.busy = True
                 state['running'] = state['updating'] = True
+                state['temporary_update'] = temporary
+                stop_monitor.set_label('更新を中断' if temporary else '監視を終了')
                 state['cancel'].clear()
                 self.set_controls(False)
                 buttons()
@@ -563,7 +668,8 @@ class Application(Gtk.Application):
                     GLib.idle_add(output.get_buffer().set_text, text)
                 def worker():
                     try:
-                        result, text = updater.update(cancel=state['cancel'], progress=report)
+                        options = {'restore_stopped': True} if temporary else {}
+                        result, text = updater.update(cancel=state['cancel'], progress=report, **options)
                     except Exception as error:
                         result, text = '定義の取得・更新を確認できませんでした。', str(error)
                     def finished():

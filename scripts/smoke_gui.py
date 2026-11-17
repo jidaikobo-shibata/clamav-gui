@@ -19,6 +19,11 @@ from gi.repository import GLib, Gtk, Gio
 from pathlib import Path
 from clam_gui.core import Plan
 from clam_gui.mailboxes import MAILBOX_NOTE, mailbox_guidance
+from unittest.mock import patch
+from clam_gui.definitions import AutoUpdateState
+auto_patch = patch('clam_gui.__main__.AutoUpdateService')
+auto_service = auto_patch.start()
+auto_service.return_value.status.return_value = AutoUpdateState(True, True, True, 24)
 app = Application()
 def check():
     assert app.menu_model.get_n_items() == 3
@@ -138,7 +143,7 @@ def check():
         deadline = time.monotonic() + 3
         while app.schedule_busy and time.monotonic() < deadline:
             GLib.MainContext.default().iteration(False)
-            time.sleep(.01)
+            time.sleep(.001)
         assert not app.schedule_busy
     save_schedule(app.store, key, Schedule(True, hour=2))
     with track_scan(app.store, key, datetime.datetime.now().astimezone().isoformat()):
@@ -186,7 +191,7 @@ def check():
         deadline = time.monotonic() + 3
         while app.busy and time.monotonic() < deadline:
             GLib.MainContext.default().iteration(False)
-            time.sleep(.01)
+            time.sleep(.001)
         assert not app.busy
         assert reason in app.notice.get_text()
         assert app.selected_profile()[0] == blocked_key
@@ -203,13 +208,48 @@ def check():
         with patch('clam_gui.packages.AptManager') as packages, patch('clam_gui.definitions.DefinitionUpdater.update') as update:
             packages.return_value.status.return_value = {'clamav': 'test', 'clamav-daemon': 'test', 'clamav-freshclam': 'test'}
             app.definition_button.emit('clicked')
-            window = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '定義ファイルの更新')
+            window = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '定義ファイルの更新設定')
             assert window.get_transient_for() == app.window
             widgets = list(descendants(window))
             install = next(w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() == 'インストール')
             assert not install.get_parent().get_visible()
-            assert any(isinstance(w, Gtk.Button) and w.get_label() == '定義ファイルを取得・更新' for w in widgets)
+            assert any(isinstance(w, Gtk.Button) and w.get_label() == '今すぐ更新を確認' for w in widgets)
             update.assert_not_called()
+            auto_switch = next(w for w in widgets if isinstance(w, Gtk.Switch))
+            def wait_auto():
+                deadline = time.monotonic() + 3
+                while (not auto_switch.get_sensitive() or app.busy) and time.monotonic() < deadline:
+                    GLib.MainContext.default().iteration(False)
+                    time.sleep(.001)
+                assert auto_switch.get_sensitive() and not app.busy
+            wait_auto()
+            assert auto_switch.get_active()
+            assert '自動更新：有効' in app.definition_button.get_label()
+            auto_switch.set_active(False)
+            dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+            dialog.response(Gtk.ResponseType.CANCEL)
+            wait_auto()
+            auto_service.return_value.set_enabled.assert_not_called()
+            assert auto_switch.get_active()
+            def set_auto(value):
+                snapshot = AutoUpdateState(value, value, True, 24)
+                auto_service.return_value.status.return_value = snapshot
+                return 'mock automatic update setting changed', snapshot
+            auto_service.return_value.set_enabled.side_effect = set_auto
+            auto_switch.set_active(False)
+            dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+            dialog.response(Gtk.ResponseType.OK)
+            wait_auto()
+            assert not auto_switch.get_active()
+            assert '自動更新：無効' in app.definition_button.get_label()
+            auto_service.return_value.set_enabled.side_effect = RuntimeError('mock authorization rejected')
+            auto_switch.set_active(True)
+            dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+            dialog.response(Gtk.ResponseType.OK)
+            wait_auto()
+            assert not auto_switch.get_active()
+            assert any(isinstance(w, Gtk.Label) and 'mock authorization rejected' in w.get_text() for w in widgets)
+            auto_service.return_value.status.return_value = AutoUpdateState(True, True, True, 24)
             window.close()
     # Exercise editor persistence and recovery without registering actual timers.
     from clam_gui.schedule import save_schedule, read_schedule
@@ -237,7 +277,7 @@ def check():
         deadline = time.monotonic() + 3
         while app.busy and time.monotonic() < deadline:
             GLib.MainContext.default().iteration(False)
-            time.sleep(.01)
+            time.sleep(.001)
         assert not app.busy
     with patch('clam_gui.__main__.Scheduler') as manager:
         manager.return_value.apply.side_effect = RuntimeError('mock registration failure')
@@ -318,7 +358,7 @@ def check():
         setup = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'ClamAVの管理')
         setup_widgets = list(descendants(setup))
         remove = next(w for w in setup_widgets if isinstance(w, Gtk.Button) and w.get_label() == 'アンインストール')
-        update = next(w for w in setup_widgets if isinstance(w, Gtk.Button) and w.get_label() == '定義ファイルを取得・更新')
+        update = next(w for w in setup_widgets if isinstance(w, Gtk.Button) and w.get_label() == '今すぐ更新を確認')
         stage = [-3]
         def package_check():
             confirmations = [w for w in Gtk.Window.list_toplevels() if w.get_title() == 'ClamAVの変更内容を確認']
