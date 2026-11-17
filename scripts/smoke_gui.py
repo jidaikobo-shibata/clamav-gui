@@ -82,6 +82,8 @@ def check():
     action_buttons = [w for w in widgets if isinstance(w, Gtk.Button) and
                       w.get_action_name() in ('app.edit-target', 'app.duplicate-target', 'app.delete-target')]
     assert len(action_buttons) == 3
+    assert next(w for w in action_buttons if w.get_action_name() == 'app.edit-target').get_label() == '対象を編集'
+    assert not any(isinstance(w, Gtk.Button) and w.get_label() == 'スケジュール' for w in widgets)
     assert all(w.get_sensitive() for w in action_buttons)
     assert 'フィッシング検査' not in app.description.get_text()
     assert '定義が3日' not in app.description.get_text()
@@ -112,19 +114,6 @@ def check():
     assert cancel.get_next_sibling() == save
     assert save.has_css_class('suggested-action')
     editors[0].destroy()
-    app.edit_schedule()
-    schedules = [w for w in Gtk.Window.list_toplevels() if w.get_title() == 'スケジュール設定']
-    assert len(schedules) == 1
-    schedule_widgets = list(descendants(schedules[0]))
-    frequency = next(w for w in schedule_widgets if isinstance(w, Gtk.DropDown) and w.get_model().get_n_items() == 5)
-    frequency.set_selected(4)
-    interval = next(w for w in schedule_widgets if isinstance(w, Gtk.SpinButton) and w.get_adjustment().get_upper() == 1440)
-    assert interval.get_parent().get_visible()
-    interval.set_value(7)
-    frequency.set_selected(3)
-    assert not interval.get_parent().get_visible()
-    frequency.set_selected(0)
-    schedules[0].destroy()
     app.close_manager()
     # Exercise editor persistence and recovery without registering actual timers.
     from clam_gui.schedule import save_schedule, read_schedule

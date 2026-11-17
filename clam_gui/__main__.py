@@ -130,12 +130,9 @@ class Application(Gtk.Application):
         details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_start=12)
         body.set_end_child(details)
         actions = Gtk.Box(spacing=8)
-        for label, name in [('フォルダー編集', 'edit-target'), ('複製', 'duplicate-target'), ('削除', 'delete-target')]:
+        for label, name in [('対象を編集', 'edit-target'), ('複製', 'duplicate-target'), ('削除', 'delete-target')]:
             actions.append(Gtk.Button(label=label, action_name='app.' + name))
         details.append(actions)
-        self.schedule_button = Gtk.Button(label='スケジュール')
-        self.schedule_button.connect('clicked', lambda _: self.edit_schedule())
-        details.append(self.schedule_button)
         manual = Gtk.Box(spacing=8)
         self.button = Gtk.Button(label='今すぐ検査')
         self.button.connect('clicked', self.scan_selected)
@@ -191,10 +188,9 @@ class Application(Gtk.Application):
         selected = self.manager_profiles[row.get_index()] if row else None
         self.manager_key = selected[0] if selected else None
         self.description.set_text(selected[1].describe(include_policy=False) + '\n' + read_schedule(self.store, selected[0]).describe()
-                                  if selected else '対象はありません。「対象管理」から追加できます。')
+                                  if selected else '対象はありません。メインメニューから追加できます。')
         for item in (self.edit_action, self.duplicate_action, self.delete_action):
             item.set_enabled(bool(selected) and not self.busy)
-        self.schedule_button.set_sensitive(bool(selected) and not self.busy)
         compatible = bool(selected) and len(selected[1].targets) == 1
         self.button.set_sensitive(compatible and not selected[1].requires_admin and not self.busy)
         self.manager_list.set_sensitive(not self.busy)
@@ -873,66 +869,6 @@ class Application(Gtk.Application):
                             hour.get_value_as_int(), minute.get_value_as_int(),
                             weekday.get_selected(), monthday.get_value_as_int(), interval.get_value_as_int())
         return read
-
-    def edit_schedule(self):
-        selected = self.operation_profile()
-        if not selected or self.busy:
-            return
-        key, plan = selected
-        saved = read_schedule(self.store, key)
-        window = Gtk.Window(application=self, title='スケジュール設定', transient_for=self.operation_parent(), modal=True)
-        window.set_default_size(600, 450)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                      margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
-        window.set_child(box)
-        box.append(Gtk.Label(label=plan.label, xalign=0, wrap=True))
-        read_fields = self.schedule_fields(box, saved, plan)
-        message = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        box.append(message)
-        apply = Gtk.Button(label='登録内容を確認')
-        box.append(apply)
-        def prepare(_button):
-            schedule = read_fields()
-            manager = Scheduler(self.store)
-            try:
-                schedule.calendar()
-                paths = manager.paths(key)
-                detail = schedule.describe() + '\n\n' + plan.describe() + '\n\n'
-                detail += 'ユーザー用systemdの登録先：\n' + '\n'.join(str(p) for p in paths)
-                detail += '\n有効化時は復帰後の検査がすぐ始まる場合があります。\n無効化しても実行中の検査は完了まで続けます。'
-                dialog = Gtk.MessageDialog(transient_for=window, modal=True,
-                    message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
-                    text='この予定を登録しますか？', secondary_text=detail)
-                def response(d, answer):
-                    d.destroy()
-                    if answer != Gtk.ResponseType.OK:
-                        return
-                    apply.set_sensitive(False)
-                    message.set_text('予定を登録しています…')
-                    def worker():
-                        try:
-                            manager.apply(key, schedule)
-                            result = '登録しました。' + schedule.describe()
-                        except Exception as error:
-                            result = '予定を登録できませんでした：' + str(error)
-                        def finished():
-                            message.set_text(result)
-                            apply.set_sensitive(True)
-                            self.profile_changed()
-                            if self.manager:
-                                self.manager_selected()
-                            return False
-                        GLib.idle_add(finished)
-                    threading.Thread(target=worker, daemon=True).start()
-                dialog.connect('response', response)
-                dialog.present()
-            except (ValueError, OSError) as error:
-                message.set_text(str(error))
-        apply.connect('clicked', prepare)
-        close = Gtk.Button(label='閉じる')
-        close.connect('clicked', lambda _: window.destroy())
-        box.append(close)
-        window.present()
 
     def confirm(self, plan, key=None):
         plan = self.store.effective_plan(plan)
