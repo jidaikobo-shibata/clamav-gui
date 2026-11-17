@@ -28,18 +28,23 @@ class Application(Gtk.Application):
             self.get_active_window().present()
             return
         window = Gtk.ApplicationWindow(application=self, title='ClamAV GUI — 開発版')
-        window.set_default_size(800, 600)
+        window.set_default_size(1160, 680)
+        self.window = window
         window.connect('close-request', self.on_close)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                       margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
-        window.set_child(box)
+        self.main_panes = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        window.set_child(self.main_panes)
+        self.main_panes.set_end_child(box)
+        self.main_panes.set_position(350)
+        self.main_panes.set_shrink_start_child(False)
+        self.main_panes.set_shrink_end_child(False)
         def action(name, callback):
             item = Gio.SimpleAction.new(name, None)
             item.connect('activate', lambda *_: callback())
             self.add_action(item)
             return item
         self.new_action = action('new-target', self.edit_profile)
-        self.manage_action = action('manage-targets', self.manage_targets)
         action('preferences', self.preferences)
         action('package-setup', self.package_setup)
         action('quit', self.request_quit)
@@ -51,7 +56,6 @@ class Application(Gtk.Application):
         self.menu_model = Gio.Menu()
         targets = Gio.Menu()
         targets.append('検査プランを追加…(_N)', 'app.new-target')
-        targets.append('検査プランを管理…(_M)', 'app.manage-targets')
         self.menu_model.append_section(None, targets)
         environment = Gio.Menu()
         environment.append('検査設定…(_P)', 'app.preferences')
@@ -69,20 +73,18 @@ class Application(Gtk.Application):
         window.set_titlebar(self.header)
         self.set_accels_for_action('app.open-menu', ['F10'])
         action('open-menu', self.main_menu.popup)
+        self.build_plan_sidebar()
         selector = Gtk.Box(spacing=12)
-        selector.append(Gtk.Label(label='検査プラン', xalign=0))
-        self.profile_names = Gtk.StringList.new([])
-        self.profiles = Gtk.DropDown(model=self.profile_names, hexpand=True)
-        self.profiles.update_property([Gtk.AccessibleProperty.LABEL], ['ログを見る検査プラン'])
-        self.profiles.connect('notify::selected', self.profile_changed)
-        selector.append(self.profiles)
+        self.selected_plan_title = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END)
+        self.selected_plan_title.add_css_class('heading')
+        selector.append(self.selected_plan_title)
         refresh = Gtk.Button(label='ログを更新')
         refresh.connect('clicked', self.history)
         selector.append(refresh)
         box.append(selector)
         body = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True)
         box.append(body)
-        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, width_request=240, margin_end=12)
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, width_request=185, margin_end=12)
         left.append(Gtk.Label(label='検査完了日時（検出ありは太字）', xalign=0))
         self.history_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.history_list.update_property([Gtk.AccessibleProperty.LABEL], ['検査完了日時一覧'])
@@ -92,7 +94,7 @@ class Application(Gtk.Application):
         scroll.set_child(self.history_list)
         left.append(scroll)
         body.set_start_child(left)
-        body.set_position(270)
+        body.set_position(215)
         body.set_shrink_start_child(False)
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_start=12)
         right.append(Gtk.Label(label='選択した検査のログ', xalign=0))
@@ -105,69 +107,51 @@ class Application(Gtk.Application):
         self.notice = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.append(self.notice)
         self.refreshing_profiles = False
-        self.manager = None
-        self.manager_key = None
+        self.action_key = None
         self.log_entries = []
         self.refresh_profiles()
+        self.state_timer = GLib.timeout_add_seconds(1, self.poll_plans)
         window.present()
 
-    def manage_targets(self):
-        if self.manager:
-            self.manager.present()
-            return
-        self.manager = Gtk.Window(application=self, title='検査プラン', transient_for=self.get_active_window(), modal=True)
-        self.manager.set_default_size(700, 520)
-        self.manager.insert_action_group('app', self)
-        header = Gtk.HeaderBar()
+    def build_plan_sidebar(self):
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                          width_request=300, margin_top=12, margin_bottom=12,
+                          margin_start=8, margin_end=8)
+        heading = Gtk.Box(spacing=8, margin_start=8, margin_end=8)
+        title = Gtk.Label(label='検査プラン', xalign=0, hexpand=True)
+        title.add_css_class('heading')
+        heading.append(title)
         self.add_plan_button = Gtk.Button(icon_name='list-add-symbolic', action_name='app.new-target',
                                          tooltip_text='検査プランを追加')
         self.add_plan_button.update_property([Gtk.AccessibleProperty.LABEL], ['検査プランを追加'])
-        header.pack_start(self.add_plan_button)
-        self.manager.set_titlebar(header)
-        area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                       margin_top=18, margin_bottom=18, margin_start=18, margin_end=18)
-        self.manager.set_child(area)
+        self.add_plan_button.add_css_class('flat')
+        heading.append(self.add_plan_button)
+        sidebar.append(heading)
         scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        self.manager_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, valign=Gtk.Align.START)
-        self.manager_list.add_css_class('boxed-list')
-        self.manager_list.update_property([Gtk.AccessibleProperty.LABEL], ['検査プラン一覧'])
-        self.manager_list.set_placeholder(Gtk.Label(label='検査プランはありません。＋から追加できます。',
+        self.plan_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE, valign=Gtk.Align.START)
+        self.plan_list.add_css_class('navigation-sidebar')
+        self.plan_list.update_property([Gtk.AccessibleProperty.LABEL], ['ログを見る検査プラン'])
+        self.plan_list.connect('row-selected', self.profile_changed)
+        self.plan_list.set_placeholder(Gtk.Label(label='検査プランはありません。＋から追加できます。',
                                                     wrap=True, margin_top=24, margin_bottom=24))
-        scroll.set_child(self.manager_list)
-        area.append(scroll)
-        self.manager_notice = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        area.append(self.manager_notice)
-        self.manager.connect('close-request', lambda _: self.close_manager())
-        self.manager_timer = GLib.timeout_add_seconds(1, self.poll_manager)
-        self.refresh_manager()
-        self.manager.present()
+        scroll.set_child(self.plan_list)
+        sidebar.append(scroll)
+        self.main_panes.set_start_child(sidebar)
 
-    def close_manager(self):
-        if self.schedule_busy or (self.busy and self.scan_key is None):
-            self.manager_notice.set_text('処理中です。完了をお待ちください。')
-            return True
-        if getattr(self, 'manager_timer', None):
-            GLib.source_remove(self.manager_timer)
-            self.manager_timer = None
-        window = self.manager
-        self.manager = None
-        self.manager_key = None
-        window.destroy()
-        return True
-
-    def refresh_manager(self):
-        if not self.manager:
-            return
-        self.manager_profiles = self.store.profiles()
-        while self.manager_list.get_first_child():
-            self.manager_list.remove(self.manager_list.get_first_child())
+    def refresh_plan_list(self, selected_key=None):
+        self.list_profiles = self.saved_profiles
+        while self.plan_list.get_first_child():
+            self.plan_list.remove(self.plan_list.get_first_child())
         self.plan_rows = {}
-        for key, plan in self.manager_profiles:
-            row = Gtk.ListBoxRow(activatable=False, selectable=False, focusable=False)
-            content = Gtk.Box(spacing=16, margin_start=16, margin_end=16, margin_top=16, margin_bottom=16)
+        for key, plan in self.list_profiles:
+            row = Gtk.ListBoxRow()
+            row.plan_key = key
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                              margin_start=8, margin_end=8, margin_top=8, margin_bottom=8)
             row.set_child(content)
             text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, hexpand=True)
-            title = Gtk.Label(label=plan.label, xalign=0, wrap=True, max_width_chars=36)
+            title = Gtk.Label(label=plan.label, xalign=0, wrap=True,
+                              wrap_mode=Pango.WrapMode.WORD_CHAR, max_width_chars=24)
             title.add_css_class('heading')
             text.append(title)
             schedule = Gtk.Label(xalign=0, wrap=True)
@@ -181,7 +165,7 @@ class Application(Gtk.Application):
             text.append(status_box)
             content.append(text)
             switch_box = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER)
-            switch_label = Gtk.Label(label='定期検査')
+            switch_label = Gtk.Label(label='定期検査', xalign=0, hexpand=True)
             switch_box.append(switch_label)
             switch = Gtk.Switch(valign=Gtk.Align.CENTER)
             switch.update_property([Gtk.AccessibleProperty.LABEL], [plan.label + 'の定期検査'])
@@ -212,17 +196,18 @@ class Application(Gtk.Application):
                                   tooltip_text=plan.label + 'の操作')
             more.update_property([Gtk.AccessibleProperty.LABEL], [plan.label + 'の操作'])
             more.insert_action_group('plan', group)
-            content.append(more)
+            switch_box.append(more)
             self.plan_rows[key] = dict(plan=plan, switch=switch, schedule=schedule, status=status,
                                        status_box=status_box, spinner=spinner, actions=actions, more=more,
-                                       updating=False)
+                                       updating=False, row=row)
             switch.connect('state-set', lambda _, value, k=key: self.toggle_schedule(k, value))
-            self.manager_list.append(row)
-        self.poll_manager()
+            self.plan_list.append(row)
+        selected_row = next((self.plan_list.get_row_at_index(i) for i, (key, _) in enumerate(self.list_profiles)
+                             if key == selected_key), self.plan_list.get_row_at_index(0))
+        self.plan_list.select_row(selected_row)
+        self.poll_plans()
 
-    def poll_manager(self):
-        if not self.manager:
-            return False
+    def poll_plans(self):
         self.new_action.set_enabled(not self.busy and not self.schedule_busy)
         try:
             previous = [(a.token, a.stopping, a.known) for a in self.active_runs]
@@ -264,13 +249,13 @@ class Application(Gtk.Application):
         return True
 
     def plan_action(self, key, name):
-        self.manager_key = key
+        self.action_key = key
         if name == 'stop':
             self.stop_plan(key)
             return
         if self.schedule_busy or self.busy:
             return
-        self.poll_manager()
+        self.poll_plans()
         widgets = self.plan_rows.get(key)
         if not widgets or not widgets['actions'][name].get_enabled():
             return
@@ -282,7 +267,7 @@ class Application(Gtk.Application):
         if not widgets or widgets['updating']:
             return True
         if self.schedule_busy or (self.busy and self.scan_key is None):
-            self.poll_manager()
+            self.poll_plans()
             return True
         try:
             saved = read_schedule(self.store, key)
@@ -290,11 +275,11 @@ class Application(Gtk.Application):
             schedule.calendar()
         except Exception as error:
             self.show_notice('予定を変更できませんでした：' + str(error))
-            self.poll_manager()
+            self.poll_plans()
             return True
         def apply():
             self.schedule_busy = True
-            self.poll_manager()
+            self.poll_plans()
             def worker():
                 error = None
                 try:
@@ -305,12 +290,12 @@ class Application(Gtk.Application):
                     self.schedule_busy = False
                     self.show_notice(error or ('定期検査を有効にしました。' if enabled else
                                                 '定期検査を停止しました。実行中の検査は続行します。'))
-                    self.poll_manager()
+                    self.poll_plans()
                     return False
                 GLib.idle_add(finished)
             threading.Thread(target=worker, daemon=True).start()
         if enabled and not saved.enabled:
-            dialog = Gtk.MessageDialog(transient_for=self.manager, modal=True,
+            dialog = Gtk.MessageDialog(transient_for=self.window, modal=True,
                 message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
                 text='定期検査を有効にしますか？', secondary_text=schedule.describe() +
                 '\n復帰後の検査がすぐ始まる場合があります。実行中の検査を中止する操作ではありません。')
@@ -319,7 +304,7 @@ class Application(Gtk.Application):
                 if answer == Gtk.ResponseType.OK:
                     apply()
                 else:
-                    self.poll_manager()
+                    self.poll_plans()
             dialog.connect('response', response)
             dialog.present()
         elif enabled != saved.enabled:
@@ -333,22 +318,20 @@ class Application(Gtk.Application):
                     request_stop(self.store, activity.token)
             if self.scan_key == key:
                 self.cancel.set()
-            self.poll_manager()
+            self.poll_plans()
         except Exception as error:
             self.show_notice('中止を依頼できませんでした：' + str(error))
 
     def operation_profile(self):
-        if self.manager and self.manager_key:
-            return next((item for item in self.store.profiles() if item[0] == self.manager_key), None)
+        if self.action_key:
+            return next((item for item in self.store.profiles() if item[0] == self.action_key), None)
         return None
 
     def operation_parent(self):
-        return self.manager or self.get_active_window()
+        return self.window
 
     def show_notice(self, text):
         self.notice.set_text(text)
-        if self.manager:
-            self.manager_notice.set_text(text)
 
     def package_setup(self, manager=None, updater=None):
         from .packages import AptManager, PACKAGES
@@ -709,8 +692,10 @@ class Application(Gtk.Application):
         threading.Thread(target=check_support, daemon=True).start()
 
     def selected_profile(self):
-        index = self.profiles.get_selected()
-        return self.saved_profiles[index] if index < len(self.saved_profiles) else None
+        row = self.plan_list.get_selected_row()
+        if row is None:
+            return None
+        return next((item for item in self.saved_profiles if item[0] == row.plan_key), None)
 
     def refresh_profiles(self, selected_key=None):
         if selected_key is None and hasattr(self, 'saved_profiles'):
@@ -718,22 +703,20 @@ class Application(Gtk.Application):
             selected_key = current[0] if current else None
         self.saved_profiles = self.store.profiles()
         self.refreshing_profiles = True
-        self.profile_names.splice(0, self.profile_names.get_n_items(), [p.label for _, p in self.saved_profiles])
-        index = next((i for i, (key, _) in enumerate(self.saved_profiles) if key == selected_key), 0)
-        self.profiles.set_selected(index if self.saved_profiles else Gtk.INVALID_LIST_POSITION)
+        self.refresh_plan_list(selected_key)
         self.refreshing_profiles = False
         self.profile_changed()
-        self.refresh_manager()
 
     def profile_changed(self, *_args):
         if self.refreshing_profiles:
             return
+        selected = self.selected_profile()
+        self.selected_plan_title.set_text(selected[1].label if selected else '検査プランを追加してください')
         self.history(None)
 
     def set_controls(self, enabled):
         self.new_action.set_enabled(enabled)
-        if self.manager:
-            self.poll_manager()
+        self.poll_plans()
 
     def scan_selected(self, _button):
         selected = self.operation_profile()
@@ -751,7 +734,7 @@ class Application(Gtk.Application):
             return
         try:
             key = self.store.duplicate_profile(selected[0])
-            self.manager_key = key
+            self.action_key = key
             self.refresh_profiles()
             self.show_notice('検査プランを複製しました。定期検査は無効です。名前や条件を編集できます。')
         except Exception as error:
@@ -799,6 +782,7 @@ class Application(Gtk.Application):
     def edit_profile(self, key=None, plan=None):
         if self.busy or self.schedule_busy:
             return
+        is_new = key is None
         plan = plan or Plan('', [str(Path.home())], [])
         editor = Gtk.Window(application=self, title='検査プランの設定', transient_for=self.operation_parent(), modal=True)
         editor.set_default_size(650, 550)
@@ -896,11 +880,8 @@ class Application(Gtk.Application):
                 error_label.set_text(str(error))
                 return
             def refresh_saved():
-                if self.manager:
-                    self.manager_key = key
-                    self.refresh_profiles()
-                else:
-                    self.refresh_profiles(key)
+                self.action_key = key
+                self.refresh_profiles(key if is_new else None)
             changed = schedule != saved_schedule
             if not changed:
                 try:
@@ -1031,8 +1012,7 @@ class Application(Gtk.Application):
                 self.cancel.clear()
                 self.set_controls(False)
                 self.scan_key = key
-                if self.manager:
-                    self.poll_manager()
+                self.poll_plans()
                 self.show_notice('検査中：' + plan.label)
                 threading.Thread(target=self.run_scan, args=(plan, key), daemon=True).start()
         dialog.connect('response', response)
@@ -1146,6 +1126,12 @@ class Application(Gtk.Application):
             return False
         window.connect('close-request', closed)
         window.present()
+
+    def do_shutdown(self):
+        if getattr(self, 'state_timer', None):
+            GLib.source_remove(self.state_timer)
+            self.state_timer = None
+        Gtk.Application.do_shutdown(self)
 
     def request_quit(self):
         if not self.on_close(None):

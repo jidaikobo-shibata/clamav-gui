@@ -23,14 +23,14 @@ app = Application()
 def check():
     assert app.menu_model.get_n_items() == 3
     menu = app.menu_model.get_item_link(0, Gio.MENU_LINK_SECTION)
-    assert menu.get_n_items() == 2
+    assert menu.get_n_items() == 1
     actions = []
     for index in range(3):
         section = app.menu_model.get_item_link(index, Gio.MENU_LINK_SECTION)
         for item in range(section.get_n_items()):
             assert section.get_item_link(item, Gio.MENU_LINK_SUBMENU) is None
             actions.append(section.get_item_attribute_value(item, 'action', None).get_string())
-    assert actions == ['app.new-target', 'app.manage-targets', 'app.preferences',
+    assert actions == ['app.new-target', 'app.preferences',
                        'app.package-setup', 'app.shortcuts', 'app.about']
     assert isinstance(app.get_active_window().get_titlebar(), Gtk.HeaderBar)
     assert app.main_menu.get_icon_name() == 'open-menu-symbolic'
@@ -76,26 +76,46 @@ def check():
         while child:
             yield from descendants(child)
             child = child.get_next_sibling()
-    app.manage_targets()
-    assert app.manager.get_modal()
-    assert app.manager.get_title() == '検査プラン'
-    assert app.manager_list.get_selection_mode() == Gtk.SelectionMode.NONE
+    assert not app.window.get_modal()
+    assert isinstance(app.window.get_child(), Gtk.Paned)
+    assert not any(isinstance(w, Gtk.DropDown) for w in descendants(app.window))
+    assert app.plan_list.get_selection_mode() == Gtk.SelectionMode.SINGLE
     assert key in app.plan_rows
+    other_plan = Plan('別の検査プラン', [str(app.store.path.parent)], [])
+    other_key = app.store.save_profile(other_plan)
+    app.store.save('2026-11-17T09:00:00+09:00', other_plan.describe(), '検査完了', 'other plan log', other_key)
+    app.refresh_profiles(key)
+    app.plan_list.select_row(app.plan_rows[other_key]['row'])
+    assert app.selected_profile()[0] == other_key
+    assert app.selected_plan_title.get_text() == other_plan.label
+    buffer = app.result.get_buffer()
+    assert 'other plan log' in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+    assert len(app.log_entries) == 1
+    app.poll_plans()
+    assert app.selected_profile()[0] == other_key
+    assert app.plan_rows[key]['more'].activate_action('plan.edit', None)
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+    assert app.selected_profile()[0] == other_key
+    assert next(w for w in descendants(editor) if isinstance(w, Gtk.Entry)).get_text() == plan.label
+    editor.destroy()
+    app.plan_list.select_row(app.plan_rows[key]['row'])
+    assert len(app.log_entries) == 2
     assert app.add_plan_button.get_action_name() == 'app.new-target'
     # Adding from the manager must not save on cancel.
     count = len(app.store.profiles())
     app.add_plan_button.emit('clicked')
     editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
-    assert editor.get_transient_for() == app.manager
+    assert editor.get_transient_for() == app.window
     editor.destroy()
     assert len(app.store.profiles()) == count
     row = app.plan_rows[key]
-    labels = [w.get_text() for w in descendants(app.manager_list) if isinstance(w, Gtk.Label)]
+    labels = [w.get_text() for w in descendants(app.plan_list) if isinstance(w, Gtk.Label)]
     assert str(Path.home()) not in labels
     assert '停止中' in row['schedule'].get_text()
     assert not row['status_box'].get_visible()
     assert app.plan_rows[key]['more'].activate_action('plan.duplicate', None)
-    duplicate = app.manager_key
+    assert app.selected_profile()[0] == key
+    duplicate = app.action_key
     assert app.operation_profile()[1].label.endswith('（複製）')
     before = len(app.store.profiles())
     app.plan_action(duplicate, 'delete')
@@ -122,7 +142,7 @@ def check():
         assert not app.schedule_busy
     save_schedule(app.store, key, Schedule(True, hour=2))
     with track_scan(app.store, key, datetime.datetime.now().astimezone().isoformat()):
-        app.poll_manager()
+        app.poll_plans()
         row = app.plan_rows[key]
         assert '02:00' in row['schedule'].get_text()
         assert row['status_box'].get_visible()
@@ -139,13 +159,13 @@ def check():
         app.plan_action(key, 'stop')
         assert activities(app.store)[0].stopping
         assert '中止しています' in row['status'].get_text()
-    app.poll_manager()
+    app.poll_plans()
     assert not app.plan_rows[key]['status_box'].get_visible()
     with patch('clam_gui.__main__.activities', side_effect=OSError('mock unavailable')):
-        app.poll_manager()
+        app.poll_plans()
         assert app.plan_rows[key]['status'].get_text() == '実行状態を確認できません'
         assert not app.plan_rows[key]['actions']['run'].get_enabled()
-    app.poll_manager()
+    app.poll_plans()
     # Failed switch changes must show the stored state again.
     with patch('clam_gui.__main__.Scheduler') as manager:
         manager.return_value.apply.side_effect = RuntimeError('mock schedule failure')
@@ -154,8 +174,7 @@ def check():
         dialog.response(Gtk.ResponseType.OK)
         settle_schedule()
         assert not app.plan_rows[key]['switch'].get_active()
-        assert '変更できませんでした' in app.manager_notice.get_text()
-    app.close_manager()
+        assert '変更できませんでした' in app.notice.get_text()
     # A manual preflight failure must be visible and stored under the executed plan.
     blocked = Plan('開始失敗の試験', [str(app.store.path.parent)], [])
     blocked_key = app.store.save_profile(blocked)
