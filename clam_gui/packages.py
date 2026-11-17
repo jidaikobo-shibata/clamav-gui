@@ -22,7 +22,7 @@ class PackagePlan:
         operation = 'インストール' if self.action == 'install' else 'アンインストール'
         text = 'ClamAVの' + operation + '\n対象：' + '、'.join(PACKAGES) + '\n\n'
         if self.action == 'remove':
-            text += ('このGUI・Thunderbird連携・既存の定期検査からClamAVを利用できなくなります。\n'
+            text += ('このGUI・既存の定期検査・ClamAVを利用する他のアプリから検査できなくなります。\n'
                      'ClamAVの検査・定義更新サービスも停止します。\n'
                      '検査対象のファイル、GUIの設定・履歴・予定は削除しません。\n'
                      'ClamAVの設定は残します。定義ファイルは削除されるため再導入後に再ダウンロードが必要です。\n')
@@ -98,7 +98,7 @@ class AptManager:
         self.check_platform()
         arguments = self.arguments(action)
         if self.scanning():
-            raise ValueError('実行中のClamAV検査または専用デーモンがあります。検査の完了を待ち、Thunderbirdなど利用中のアプリを終了してから再実行してください。')
+            raise ValueError('実行中のClamAV検査または専用デーモンがあります。検査の完了を待ち、ClamAVを利用している他のアプリを終了してから再実行してください。')
         result = self.run(['/usr/bin/apt-get', '--simulate', *arguments], capture_output=True,
                           text=True, timeout=60, env={**os.environ, 'LC_ALL': 'C'})
         if result.returncode:

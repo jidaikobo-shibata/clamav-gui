@@ -403,7 +403,7 @@ class Application(Gtk.Application):
         box.append(status)
         explanation = ('既存のFreshClam自動更新サービスを利用して、定義ファイルを取得・更新します。'
                        if update_only else 'ClamAVは、このGUI以外のアプリも利用する共通のソフトウェアです。\n'
-                       '削除するとThunderbird連携などの検査も使えなくなります。')
+                       '削除すると、ClamAVを利用する他のアプリの検査も使えなくなります。')
         box.append(Gtk.Label(label=explanation, xalign=0, wrap=True))
         controls = Gtk.Box(spacing=8, homogeneous=True)
         install = Gtk.Button(label='インストール')
@@ -615,7 +615,7 @@ class Application(Gtk.Application):
                 return True
             detail = ('OS起動時の自動起動を有効にして、更新サービスを開始します。アプリを閉じても動きます。'
                       if enabled else '更新サービスを停止し、OS起動時の自動起動も無効にします。取得中の処理があれば中断します。')
-            detail += '\nThunderbird連携など、この端末でClamAVを使う他の機能にも影響します。管理者認証が必要な場合があります。'
+            detail += '\nこの端末でClamAVを使う他の機能にも影響します。管理者認証が必要な場合があります。'
             dialog = Gtk.MessageDialog(transient_for=window, modal=True, message_type=Gtk.MessageType.QUESTION,
                 buttons=Gtk.ButtonsType.OK_CANCEL, text='自動更新を有効にしますか？' if enabled else '自動更新を無効にしますか？',
                 secondary_text=detail)
@@ -758,7 +758,7 @@ class Application(Gtk.Application):
             '標準値を使う場合はClamAVへ数値を指定しません。\n'
             '両方を指定するときは合計上限を1ファイルの上限以上にしてください。\n'
             '上限を超えた対象は検査不完了として報告します。', xalign=0, wrap=True))
-        info = Gtk.Label(label='保存先：' + str(self.store.path) + '\nThunderbirdアドオンの設定は変更しません。',
+        info = Gtk.Label(label='保存先：' + str(self.store.path),
                          xalign=0, wrap=True, selectable=True)
         box.append(info)
         message = Gtk.Label(xalign=0, wrap=True)

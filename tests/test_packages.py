@@ -42,7 +42,8 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(set(manager.status()), set(PACKAGES))
         plan = manager.preview('remove')
         self.assertEqual(len(plan.changes), 3)
-        self.assertIn('Thunderbird', plan.describe())
+        self.assertNotIn('Thunderbird', plan.describe())
+        self.assertIn('他のアプリ', plan.describe())
         self.assertIn('再ダウンロード', plan.describe())
         self.assertFalse(any(call[0] == '/usr/bin/pkexec' for call in run.calls))
 

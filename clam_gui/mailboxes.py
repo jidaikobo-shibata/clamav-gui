@@ -79,8 +79,6 @@ def mailbox_guidance(findings):
              '今回の結果では、対象のメールや添付ファイルは特定できていません。',
              'ファイル全体を削除・隔離すると、問題のないメールも利用できなくなる可能性があります。',
              '保存ファイル自体は削除せず、使用しているメールアプリで確認してください。']
-    for path, thunderbird in findings:
+    for path, _ in findings:
         lines += ['\n対象ファイル：' + path]
-        if thunderbird:
-            lines.append('Thunderbirdのメール保存領域です。メール検査アドオンで対象フォルダーを検査してください。')
     return '\n'.join(lines)
