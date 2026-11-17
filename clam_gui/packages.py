@@ -20,7 +20,7 @@ class PackagePlan:
 
     def describe(self):
         operation = 'インストール' if self.action == 'install' else 'アンインストール'
-        text = 'ClamAVの' + operation + '\n対象：' + '、'.join(PACKAGES) + '\n\n'
+        text = 'ClamAVの' + operation + '\n\n'
         if self.action == 'remove':
             text += ('このGUI・既存の定期検査・ClamAVを利用する他のアプリから検査できなくなります。\n'
                      'ClamAVの検査・定義更新サービスも停止します。\n'
@@ -31,7 +31,22 @@ class PackagePlan:
                      '不足する依存パッケージも追加します。既存の設定ファイルを優先して残します。\n'
                      'パッケージ標準の処理によりClamAVサービスが起動する場合があります。\n'
                      '初回の定義更新には時間がかかります。\n')
-        return text + '\n管理者認証の前に、以下の変更予定を確認してください。\n\n' + self.detail
+        groups = [('削除予定', 'Remv'), ('追加・更新予定', 'Inst'), ('設定予定', 'Conf')]
+        installed = {line.split()[1] for line in self.changes if line.startswith('Inst ')}
+        summaries = []
+        for label, kind in groups:
+            names = list(dict.fromkeys(line.split()[1] for line in self.changes
+                                      if line.startswith(kind + ' ') and
+                                      not (kind == 'Conf' and line.split()[1] in installed)))
+            if names:
+                summaries.append(f'{label}：{len(names)}件\n' + '\n'.join('・' + name for name in names))
+        summary = '\n\n'.join(summaries) if summaries else '変更は不要です。'
+        introduction = ('まだ削除していません。以下は実行前の変更予定です。' if self.action == 'remove' else
+                        'まだインストールしていません。以下は実行前の変更予定です。')
+        return (introduction + '\n\n' + summary + '\n\n' + text +
+                '\n一覧にないパッケージの更新・削除や、不要パッケージの自動削除は行いません。\n'
+                '\n「管理者認証して実行」を押すと、必要に応じてOSの認証画面が開きます。\n'
+                '認証が許可されると処理を開始します。アプリをrootで起動する必要はありません。')
 
 
 class AptManager:

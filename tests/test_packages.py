@@ -37,7 +37,7 @@ class PackageTests(unittest.TestCase):
         return AptManager(run=run, release=self.release)
 
     def test_status_and_read_only_preview(self):
-        run = FakeRun('Remv clamav [1.5.4]\nRemv clamav-daemon [1.5.4]\nRemv clamav-freshclam [1.5.4]')
+        run = FakeRun('NOTE: This is only a simulation!\nUse apt autoremove to remove them.\nRemv clamav [1.5.4]\nRemv clamav-daemon [1.5.4]\nRemv clamav-freshclam [1.5.4]')
         manager = self.manager(run)
         self.assertEqual(set(manager.status()), set(PACKAGES))
         plan = manager.preview('remove')
@@ -45,6 +45,12 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn('Thunderbird', plan.describe())
         self.assertIn('他のアプリ', plan.describe())
         self.assertIn('再ダウンロード', plan.describe())
+        self.assertIn('まだ削除していません', plan.describe())
+        self.assertIn('削除予定：3件', plan.describe())
+        self.assertIn('OSの認証画面', plan.describe())
+        self.assertNotIn('only a simulation', plan.describe())
+        self.assertNotIn('apt autoremove', plan.describe())
+        self.assertIn('only a simulation', plan.detail)
         self.assertFalse(any(call[0] == '/usr/bin/pkexec' for call in run.calls))
 
     def test_install_fixed_system_command_and_no_purge(self):
