@@ -82,7 +82,11 @@ def check():
             yield from descendants(child)
             child = child.get_next_sibling()
     assert not app.window.get_modal()
-    assert isinstance(app.window.get_child(), Gtk.Paned)
+    assert app.main_panes.get_parent() == app.window.get_child()
+    app.show_notice('')
+    assert not app.notice.get_visible()
+    app.show_notice('メッセージ表示の試験')
+    assert app.notice.get_visible()
     assert not any(isinstance(w, Gtk.DropDown) for w in descendants(app.window))
     assert app.plan_list.get_selection_mode() == Gtk.SelectionMode.SINGLE
     assert key in app.plan_rows

@@ -39,8 +39,10 @@ class Application(Gtk.Application):
         window.connect('close-request', self.on_close)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                       margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
-        self.main_panes = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        window.set_child(self.main_panes)
+        layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        window.set_child(layout)
+        self.main_panes = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True)
+        layout.append(self.main_panes)
         self.main_panes.set_end_child(box)
         self.main_panes.set_position(350)
         self.main_panes.set_shrink_start_child(False)
@@ -108,10 +110,14 @@ class Application(Gtk.Application):
         self.result.update_property([Gtk.AccessibleProperty.LABEL], ['選択した日時の検査ログ'])
         scroll = Gtk.ScrolledWindow(vexpand=True, hexpand=True)
         scroll.set_child(self.result)
+        self.log_scroll = scroll
         right.append(scroll)
         body.set_end_child(right)
-        self.notice = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        box.append(self.notice)
+        footer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                         margin_start=12, margin_end=12, margin_bottom=12)
+        layout.append(footer)
+        self.notice = Gtk.Label(xalign=0, wrap=True, selectable=True, visible=False)
+        footer.append(self.notice)
         definitions = Gtk.Box(spacing=12, halign=Gtk.Align.END)
         self.definition_label = Gtk.Label(xalign=1, wrap=True)
         self.definition_label.set_tooltip_text('端末にある定義ファイルのうち、最後に書き換わった日時です。更新の確認だけを行った時刻とは異なります。')
@@ -119,7 +125,7 @@ class Application(Gtk.Application):
         self.definition_button = Gtk.Button(label='自動更新：確認中…', tooltip_text='定義ファイルの自動更新を設定')
         self.definition_button.connect('clicked', lambda _: self.package_setup(update_only=True))
         definitions.append(self.definition_button)
-        box.append(definitions)
+        footer.append(definitions)
         self.refreshing_profiles = False
         self.action_key = None
         self.log_entries = []
@@ -142,13 +148,14 @@ class Application(Gtk.Application):
         heading.append(self.add_plan_button)
         sidebar.append(heading)
         scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        self.plan_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE, valign=Gtk.Align.START)
+        self.plan_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.plan_list.add_css_class('navigation-sidebar')
         self.plan_list.update_property([Gtk.AccessibleProperty.LABEL], ['ログを見る検査プラン'])
         self.plan_list.connect('row-selected', self.profile_changed)
         self.plan_list.set_placeholder(Gtk.Label(label='検査プランはありません。＋から追加できます。',
                                                     wrap=True, margin_top=24, margin_bottom=24))
         scroll.set_child(self.plan_list)
+        self.plan_scroll = scroll
         sidebar.append(scroll)
         self.main_panes.set_start_child(sidebar)
 
@@ -349,6 +356,7 @@ class Application(Gtk.Application):
 
     def show_notice(self, text):
         self.notice.set_text(text)
+        self.notice.set_visible(bool(text))
 
     def show_auto_status(self, status):
         self.auto_generation += 1
