@@ -21,9 +21,21 @@ from clam_gui.core import Plan
 from clam_gui.mailboxes import MAILBOX_NOTE, mailbox_guidance
 app = Application()
 def check():
-    assert app.menu_model.get_n_items() == 2
-    menu = app.menu_model.get_item_link(0, Gio.MENU_LINK_SUBMENU)
+    assert app.menu_model.get_n_items() == 3
+    menu = app.menu_model.get_item_link(1, Gio.MENU_LINK_SUBMENU)
     assert menu.get_n_items() == 2
+    assert app.get_accels_for_action('app.quit') == ['<Control>q']
+    file_menu = app.menu_model.get_item_link(0, Gio.MENU_LINK_SUBMENU)
+    assert file_menu.get_item_attribute_value(0, 'action', None).get_string() == 'app.quit'
+    from unittest.mock import patch
+    with patch.object(app, 'quit') as quit_mock, patch.object(app, 'show_notice') as notice:
+        app.busy = True
+        app.activate_action('quit', None)
+        quit_mock.assert_not_called()
+        notice.assert_called_once()
+        app.busy = False
+        app.activate_action('quit', None)
+        quit_mock.assert_called_once()
     key = app.store.save_profile(Plan('試験対象', [str(Path.home())], []))
     plan = dict(app.store.profiles())[key]
     app.store.save('2026-11-16T10:00:00+09:00', plan.describe(), '検査完了', 'normal log', key)

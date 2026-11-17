@@ -40,7 +40,12 @@ class Application(Gtk.Application):
         self.delete_action = action('delete-target', self.delete_selected)
         action('preferences', self.preferences)
         action('package-setup', self.package_setup)
+        action('quit', self.request_quit)
+        self.set_accels_for_action('app.quit', ['<Control>q'])
         self.menu_model = Gio.Menu()
+        file_menu = Gio.Menu()
+        file_menu.append('終了(_Q)', 'app.quit')
+        self.menu_model.append_submenu('ファイル(_F)', file_menu)
         targets = Gio.Menu()
         targets.append('対象を追加...', 'app.new-target')
         targets.append('対象を管理...', 'app.manage-targets')
@@ -924,6 +929,10 @@ class Application(Gtk.Application):
         entry = self.log_entries[row.get_index()]
         self.result.get_buffer().set_text(entry.date_label() + '\n' + entry.status + '\n\n' +
                                           entry.target + '\n\n' + entry.output)
+
+    def request_quit(self):
+        if not self.on_close(None):
+            self.quit()
 
     def on_close(self, _window):
         if self.busy:
