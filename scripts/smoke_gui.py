@@ -195,6 +195,22 @@ def check():
         assert reason in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
         assert len(app.store.history_entries(blocked_key, blocked)) == 1
         notify.assert_called_once()
+    # The main screen exposes local definition time and an update-only view.
+    with patch('clam_gui.__main__.definition_update_label', return_value='定義ファイル更新：2026/11/17 08:00'):
+        app.poll_plans()
+        assert app.definition_label.get_text() == '定義ファイル更新：2026/11/17 08:00'
+        assert app.definition_button.get_sensitive()
+        with patch('clam_gui.packages.AptManager') as packages, patch('clam_gui.definitions.DefinitionUpdater.update') as update:
+            packages.return_value.status.return_value = {'clamav': 'test', 'clamav-daemon': 'test', 'clamav-freshclam': 'test'}
+            app.definition_button.emit('clicked')
+            window = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '定義ファイルの更新')
+            assert window.get_transient_for() == app.window
+            widgets = list(descendants(window))
+            install = next(w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() == 'インストール')
+            assert not install.get_parent().get_visible()
+            assert any(isinstance(w, Gtk.Button) and w.get_label() == '定義ファイルを取得・更新' for w in widgets)
+            update.assert_not_called()
+            window.close()
     # Exercise editor persistence and recovery without registering actual timers.
     from clam_gui.schedule import save_schedule, read_schedule
     import time

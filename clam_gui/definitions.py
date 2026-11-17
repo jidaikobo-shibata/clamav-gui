@@ -10,6 +10,24 @@ import time
 SERVICE = 'clamav-freshclam.service'
 
 
+def definition_update_label(directory=Path('/var/lib/clamav')):
+    """Local database modification time, never the last update-check time."""
+    try:
+        dates = []
+        for pattern in ('*.cvd', '*.cld', '*.cud'):
+            for path in Path(directory).glob(pattern):
+                if path.is_file():
+                    info = path.stat()
+                    if info.st_size:
+                        dates.append(info.st_mtime)
+        if not dates:
+            return '定義ファイル更新：未取得または確認できません'
+        updated = datetime.datetime.fromtimestamp(max(dates)).astimezone()
+        return f'定義ファイル更新：{updated:%Y/%m/%d %H:%M}'
+    except (OSError, ValueError, OverflowError):
+        return '定義ファイル更新：日時を確認できません'
+
+
 class UpdateTracker:
     def __init__(self, expected=('daily', 'main', 'bytecode')):
         self.expected = set(expected)

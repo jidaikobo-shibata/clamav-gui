@@ -11,6 +11,7 @@ from .core import Store, Plan, engine_status, scan, record_scan_failure
 from .options import OPTIONS, supported_options, standard_defaults, option_arguments, LIMITS, limit_arguments
 from .schedule import Schedule, Scheduler, read_schedule
 from .runtime import activities, request_stop
+from .definitions import definition_update_label
 
 
 class Application(Gtk.Application):
@@ -106,6 +107,14 @@ class Application(Gtk.Application):
         body.set_end_child(right)
         self.notice = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.append(self.notice)
+        definitions = Gtk.Box(spacing=12)
+        self.definition_label = Gtk.Label(xalign=0, wrap=True, hexpand=True)
+        self.definition_label.set_tooltip_text('端末にある定義ファイルのうち、最後に書き換わった日時です。更新の確認だけを行った時刻とは異なります。')
+        definitions.append(self.definition_label)
+        self.definition_button = Gtk.Button(label='定義ファイルを更新…')
+        self.definition_button.connect('clicked', lambda _: self.package_setup(update_only=True))
+        definitions.append(self.definition_button)
+        box.append(definitions)
         self.refreshing_profiles = False
         self.action_key = None
         self.log_entries = []
@@ -208,6 +217,8 @@ class Application(Gtk.Application):
         self.poll_plans()
 
     def poll_plans(self):
+        self.definition_label.set_text(definition_update_label())
+        self.definition_button.set_sensitive(not self.busy and not self.schedule_busy)
         self.new_action.set_enabled(not self.busy and not self.schedule_busy)
         try:
             previous = [(a.token, a.stopping, a.known) for a in self.active_runs]
@@ -333,21 +344,25 @@ class Application(Gtk.Application):
     def show_notice(self, text):
         self.notice.set_text(text)
 
-    def package_setup(self, manager=None, updater=None):
+    def package_setup(self, manager=None, updater=None, update_only=False):
         from .packages import AptManager, PACKAGES
         from .notifications import definition_status
         manager = manager or AptManager()
         from .definitions import DefinitionUpdater
         updater = updater or DefinitionUpdater()
-        window = Gtk.Window(application=self, title='ClamAVの管理', transient_for=self.operation_parent(), modal=True)
+        window = Gtk.Window(application=self, title='定義ファイルの更新' if update_only else 'ClamAVの管理',
+                            transient_for=self.operation_parent(), modal=True)
         window.set_default_size(720, 580)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                       margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
         window.set_child(box)
-        status = Gtk.Label(label='導入状態を確認しています…', xalign=0, wrap=True, selectable=True)
+        status = Gtk.Label(label='更新機能の状態を確認しています…' if update_only else '導入状態を確認しています…',
+                           xalign=0, wrap=True, selectable=True)
         box.append(status)
-        box.append(Gtk.Label(label='ClamAVは、このGUI以外のアプリも利用する共通のソフトウェアです。\n'
-            '削除するとThunderbird連携などの検査も使えなくなります。', xalign=0, wrap=True))
+        explanation = ('既存のFreshClam自動更新サービスを利用して、定義ファイルを取得・更新します。'
+                       if update_only else 'ClamAVは、このGUI以外のアプリも利用する共通のソフトウェアです。\n'
+                       '削除するとThunderbird連携などの検査も使えなくなります。')
+        box.append(Gtk.Label(label=explanation, xalign=0, wrap=True))
         controls = Gtk.Box(spacing=8, homogeneous=True)
         install = Gtk.Button(label='インストール')
         remove = Gtk.Button(label='アンインストール')
@@ -355,6 +370,7 @@ class Application(Gtk.Application):
         controls.append(install)
         controls.append(remove)
         box.append(controls)
+        controls.set_visible(not update_only)
         update_controls = Gtk.Box(spacing=8)
         update = Gtk.Button(label='定義ファイルを取得・更新', hexpand=True)
         stop_monitor = Gtk.Button(label='監視を終了', sensitive=False)
@@ -402,8 +418,9 @@ class Application(Gtk.Application):
                 try:
                     installed = manager.status()
                     lines = [package + ': ' + installed.get(package, '未導入') for package in PACKAGES]
-                    text = '\n'.join(lines) + '\n\n' + definition_status()
-                    if len(installed) == len(PACKAGES):
+                    text = (definition_update_label() + '\n' + definition_status() if update_only else
+                            '\n'.join(lines) + '\n\n' + definition_status())
+                    if not update_only and len(installed) == len(PACKAGES):
                         text += '\n初回導入後は、定義ファイルの更新が終わってから検査してください。'
                     error = None
                 except Exception as exception:
@@ -415,8 +432,11 @@ class Application(Gtk.Application):
                     status.set_text(text)
                     if error is None:
                         buttons()
+                        if update_only and 'clamav-freshclam' not in installed:
+                            message.set_text('FreshClamが未導入です。メインメニューの「ClamAVの管理」からインストールしてください。')
                     else:
-                        message.set_text('この環境では導入・削除を実行できません。')
+                        message.set_text('この環境では定義ファイルの更新を開始できません。' if update_only else
+                                         'この環境では導入・削除を実行できません。')
                         refresh.set_sensitive(True)
                     return False
                 GLib.idle_add(finished)
