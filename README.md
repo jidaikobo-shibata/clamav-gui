@@ -52,7 +52,7 @@ GUIを閉じても動作しますが、ログアウト中や電源オフ中の�
 ## 他OSへの移植
 
 macOS・Windowsではまだ動作確認していません。Linux向けの依存箇所と分担案は
-[CONTRIBUTING.md](CONTRIBUTING.md)を参照してください。
+macOSは[CONTRIBUTING.md](CONTRIBUTING.md)、Windowsは[Windows担当Codexへの依頼](docs/WINDOWS_HANDOFF.md)を参照してください。
 
 ## ライセンス
 
