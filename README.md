@@ -279,3 +279,8 @@ GUIや実サービスなしの監視・停止・再起動後の変更検査を�
 Ubuntuの常駐監視は実装済みですが、macOS/Windowsの常駐起動は未対応です。
 
 ユーザーサービスのセッション連携は、[systemdのgraphical-session.targetの仕様](https://www.freedesktop.org/software/systemd/man/latest/systemd.special.html#graphical-session.target)を参照しています。
+
+## コードの責務とOS移植
+
+画面別の分割、OS連携の入口、検査結果と旧データの互換については
+[コードの責務とOS移植の入口](docs/ARCHITECTURE.md)を参照してください。

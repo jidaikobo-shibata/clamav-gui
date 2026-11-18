@@ -4,22 +4,13 @@ from dataclasses import dataclass
 import datetime
 import os
 import sqlite3
-from pathlib import Path
 import uuid
 
 
 def process_identity(pid):
-    """Linux boot/start identity prevents stale records from matching a reused PID."""
-    try:
-        text = Path(f'/proc/{pid}/stat').read_text()
-        fields = text[text.rindex(')') + 2:].split()
-        if fields[0] in ('Z', 'X'):
-            return ''
-        return Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':' + fields[19]
-    except FileNotFoundError:
-        return '' if Path('/proc').is_dir() else None
-    except (OSError, ValueError, IndexError):
-        return None
+    """The backend distinguishes dead, identified, and unknown processes."""
+    from .platforms import get_backend
+    return get_backend().process_identity(pid)
 
 
 @dataclass(frozen=True)

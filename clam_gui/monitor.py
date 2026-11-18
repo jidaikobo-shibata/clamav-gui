@@ -1,22 +1,19 @@
 """Headless GLib monitoring process; no Gtk application or desktop window."""
+from .notifications import AutomaticNotices
 import json
-import signal
 import threading
 import subprocess
 import time
+from .platforms import get_backend
 from .automation import Automation, MEDIA_ID, signature
 from .background import Lease, enabled, watched_plans, preference, put_preference
-from .gio_watch import Observers
 from gi.repository import GLib
 
 
 def notify(title, body, urgency='normal'):
     try:
-        result = subprocess.run(['notify-send', '--app-name=ClamAV GUI', '--urgency='+urgency,
-                                 title, body], capture_output=True, timeout=10)
-        if result.returncode:
-            print('通知を表示できませんでした。検査履歴を確認してください。', flush=True)
-    except (OSError, subprocess.TimeoutExpired):
+        get_backend().notify(title, body, urgency)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
         print('通知を表示できませんでした。検査履歴を確認してください。', flush=True)
 
 
@@ -103,7 +100,7 @@ class Checkpoints:
 
 
 class Monitor:
-    def __init__(self, store, observers=Observers, notifier=notify):
+    def __init__(self, store, observers=None, notifier=notify):
         self.store = store
         self.notification_slots = threading.BoundedSemaphore(4)
         def asynchronous_notify(*args):
@@ -122,9 +119,9 @@ class Monitor:
         self.revision = time.time()
         self.engine = Automation(store, GLib.idle_add, self.finished, self.changed)
         self.checkpoints = Checkpoints(store, self.engine)
-        self.observers = observers(self.engine)
+        self.observers = (observers or get_backend().observers)(self.engine)
         self.observers.inventory = self.checkpoints.inventory
-        self.notices, self.command = {}, None
+        self.notices, self.command = AutomaticNotices(), None
         self.stopping = False
         self.failure = None
         self.last_tick = time.time()
@@ -137,18 +134,15 @@ class Monitor:
 
     def finished(self, key, status, output, label=None):
         self.changed()
-        if status.startswith('検査完了'):
-            count, start, _ = self.notices.get(key, (0, time.monotonic(), label))
-            self.notices[key] = count+1, start, label
-        else:
-            self.notifier('ClamAV 自動検査の結果', (label or key)+'\n'+status+'\n検査ログを確認してください。', 'critical')
+        notice = self.notices.record(key, label or key, status, output)
+        if notice:
+            self.notifier(notice.title, notice.body, notice.urgency)
         self.checkpoints.scanned()
 
     def flush(self, force=False):
-        for key, (count, start, label) in list(self.notices.items()):
-            if force or time.monotonic()-start >= 20:
-                self.notifier('ClamAV 自動検査完了', f'{label}：{count}回の検査が正常に完了しました。')
-                self.notices.pop(key, None)
+        for key in self.notices.due(force):
+            notice = self.notices.flush(key)
+            self.notifier(notice.title, notice.body, notice.urgency)
 
     def tick(self):
         if self.stopping or not enabled(self.store):
@@ -218,8 +212,7 @@ class Monitor:
                 self.engine.close()
 
     def run(self):
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: (self.stop(), True)[1])
+        get_backend().install_stop_handlers(self.stop)
         GLib.timeout_add(500, self.checked_tick)
         try:
             self.loop.run()

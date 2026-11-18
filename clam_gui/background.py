@@ -1,27 +1,22 @@
 """User-session service management and private cross-process monitoring state."""
 from dataclasses import replace
-import fcntl
 import hashlib
-import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import time
 import uuid
-from .schedule import MARKER, Scheduler, quote, read_schedule
+from .platforms import get_backend
+from .schedule import MARKER, Scheduler, quote, read_schedules
 
 
 def preference(store, key, default=None):
-    with store.connect() as db:
-        row = db.execute('SELECT value FROM preferences WHERE key=?', (key,)).fetchone()
-    return json.loads(row[0]) if row else default
+    return store.preferences.get(key, default)
 
 
 def put_preference(store, key, value):
-    with store.connect() as db:
-        db.execute('INSERT INTO preferences VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                   (key, json.dumps(value, ensure_ascii=False)))
+    store.preferences.set(key, value)
 
 
 def enabled(store):
@@ -31,8 +26,9 @@ def enabled(store):
 def watched_plans(store):
     internal = [store.path.parent, Path.home()/'.clamdlog']
     plans = []
+    schedules = read_schedules(store)
     for key, plan in store.profiles():
-        if plan.kind != 'watch' or not read_schedule(store, key).enabled or plan.requires_admin:
+        if plan.kind != 'watch' or not (schedules.get(key) and schedules[key].enabled) or plan.requires_admin:
             continue
         root = Path(plan.targets[0])
         if any(root == path or path in root.parents for path in internal):
@@ -46,24 +42,17 @@ class Lease:
     """One monitoring owner across GUI, service, and duplicate launches."""
     def __init__(self, store):
         self.path = store.path.parent/'monitor.lock'
-        self.file = None
+        self.lock = get_backend().lock(self.path)
+
+    @property
+    def file(self):
+        return self.lock.file
 
     def acquire(self):
-        if self.file:
-            return True
-        file = self.path.open('a')
-        try:
-            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            file.close()
-            return False
-        self.file = file
-        return True
+        return self.lock.acquire()
 
     def close(self):
-        if self.file:
-            self.file.close()
-            self.file = None
+        self.lock.close()
 
 
 def heartbeat(store):

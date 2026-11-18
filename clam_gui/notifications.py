@@ -1,5 +1,8 @@
 """Notification content for scheduled scans."""
+from .results import assess
 import datetime
+from dataclasses import dataclass
+import time
 from pathlib import Path
 import re
 from .mailboxes import MAILBOX_NOTE
@@ -19,10 +22,10 @@ def definition_status(directory=Path('/var/lib/clamav'), now=None):
 
 
 def scan_notification(label, status, output, started, finished, definitions):
-    clean = status.startswith('検査完了')
+    clean = assess(status, output).clean
     if clean:
         title, urgency = 'ClamAV 検査完了', 'normal'
-    elif status.startswith('検出あり'):
+    elif assess(status, output).detected:
         title, urgency = 'ClamAV 検出報告', 'critical'
     else:
         title, urgency = 'ClamAV 検査不完了', 'critical'
@@ -41,3 +44,34 @@ def scan_notification(label, status, output, started, finished, definitions):
     if not clean:
         body += '\n検査プランを選び、該当日時のログを確認してください。'
     return title, body, urgency
+
+
+@dataclass(frozen=True)
+class AutomaticNotice:
+    title: str
+    body: str
+    urgency: str = 'normal'
+
+
+class AutomaticNotices:
+    """Shared policy for GUI and headless monitors; delivery belongs to adapters."""
+    def __init__(self, clock=time.monotonic, delay=20):
+        self.clock, self.delay = clock, delay
+        self.pending = {}
+
+    def record(self, key, label, status, output=''):
+        if assess(status, output).clean:
+            count, start, _ = self.pending.get(key, (0, self.clock(), label))
+            self.pending[key] = count + 1, start, label
+            return None
+        return AutomaticNotice('ClamAV 自動検査の結果', label+'\n'+status+'\n検査プランのログを確認してください。', 'critical')
+
+    def flush(self, key):
+        value = self.pending.pop(key, None)
+        if value:
+            count, _, label = value
+            return AutomaticNotice('ClamAV 自動検査完了', f'{label}：{count}回の検査が正常に完了しました。')
+        return None
+
+    def due(self, force=False):
+        return [key for key, (_, start, _) in self.pending.items() if force or self.clock()-start >= self.delay]

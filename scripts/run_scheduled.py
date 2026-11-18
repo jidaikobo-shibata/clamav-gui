@@ -8,6 +8,9 @@ import sys
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from clam_gui.platforms import get_backend
+from clam_gui.jobs import execute_scan
+from clam_gui.results import assess
 from clam_gui.core import Store, scan, record_scan_failure
 from clam_gui.schedule import read_schedule
 from clam_gui.notifications import definition_status, scan_notification
@@ -31,7 +34,7 @@ def main():
     started = datetime.datetime.now().astimezone()
     output = ''
     try:
-        status, output = scan(plan, store, cancel, profile_id=args.profile)
+        status, output = execute_scan(plan, store, cancel, scanner=scan, profile_id=args.profile)
     except Exception as error:
         status, output = record_scan_failure(store, plan, error, args.profile,
                                              started.isoformat(timespec='seconds'))
@@ -39,14 +42,10 @@ def main():
     title, body, urgency = scan_notification(plan.label, status, output, started, finished, definition_status())
     print(status)
     try:
-        notification = subprocess.run(['notify-send', '--app-name=ClamAV GUI',
-                        '--urgency=' + urgency, '--expire-time=0', title, body],
-                        capture_output=True, timeout=10)
-        if notification.returncode:
-            print('デスクトップ通知を送れませんでした。履歴を確認してください。', file=sys.stderr)
-    except (OSError, subprocess.TimeoutExpired):
+        get_backend().notify(title, body, urgency)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
         print('デスクトップ通知を送れませんでした。履歴を確認してください。', file=sys.stderr)
-    return 0 if status.startswith('検査完了') else 2
+    return 0 if assess(status, output).clean else 2
 
 
 if __name__ == '__main__':

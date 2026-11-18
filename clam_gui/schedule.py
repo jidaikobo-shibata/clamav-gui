@@ -60,6 +60,12 @@ def read_schedule(store, key):
     return Schedule(**json.loads(row[0])) if row else Schedule()
 
 
+def read_schedules(store):
+    with store.connect() as db:
+        rows = db.execute('SELECT profile_id,data FROM schedules').fetchall()
+    return {key: Schedule(**json.loads(data)) for key, data in rows}
+
+
 def save_schedule(store, key, schedule):
     schedule.calendar()
     with store.connect() as db:

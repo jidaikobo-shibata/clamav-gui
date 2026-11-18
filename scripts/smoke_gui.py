@@ -21,22 +21,22 @@ from clam_gui.core import Plan
 from clam_gui.mailboxes import MAILBOX_NOTE, mailbox_guidance
 from unittest.mock import patch
 from clam_gui.definitions import AutoUpdateState
-auto_patch = patch('clam_gui.__main__.AutoUpdateService')
+auto_patch = patch('clam_gui.definitions.AutoUpdateService')
 auto_service = auto_patch.start()
 auto_service.return_value.status.return_value = AutoUpdateState(True, True, True, 24)
 from clam_gui.options import DEFAULTS, LIMITS
 # Keep the GUI test independent of whether the real ClamAV package is installed.
 patch('clam_gui.__main__.shutil.which', return_value='/mock/clamscan').start()
-patch('clam_gui.__main__.supported_options', return_value=set(DEFAULTS) | set(LIMITS)).start()
+patch('clam_gui.ui.preferences.supported_options', return_value=set(DEFAULTS) | set(LIMITS)).start()
 standard = dict(DEFAULTS, **{'phishing-sigs': True, 'phishing-scan-urls': True, 'alert-encrypted': False})
-patch('clam_gui.__main__.standard_defaults', return_value=standard).start()
-patch('clam_gui.__main__.engine_status', return_value='ClamAV test engine').start()
+patch('clam_gui.ui.preferences.standard_defaults', return_value=standard).start()
+patch('clam_gui.ui.preferences.engine_status', return_value='ClamAV test engine').start()
 from clam_gui.gio_watch import Observers
 class TestVolumes:
     def get_mounts(self): return []
     def connect(self, *args): return len(args)
     def disconnect(self, *args): pass
-patch('clam_gui.__main__.Observers', side_effect=lambda engine: Observers(engine, TestVolumes())).start()
+patch('clam_gui.gio_watch.Observers', side_effect=lambda engine: Observers(engine, TestVolumes())).start()
 app = Application()
 def check():
     assert app.install_prompt_checked and app.install_prompt is None
@@ -195,7 +195,7 @@ def check():
         assert not row['actions']['edit'].get_enabled()
         assert row['actions']['stop'].get_enabled()
         # Disabling the schedule never cancels the current scan.
-        with patch('clam_gui.__main__.Scheduler') as manager:
+        with patch('clam_gui.schedule.Scheduler') as manager:
             manager.return_value.apply.side_effect = lambda k, schedule: save_schedule(app.store, k, schedule)
             row['switch'].set_active(False)
             settle_schedule()
@@ -212,7 +212,7 @@ def check():
         assert not app.plan_rows[key]['actions']['run'].get_enabled()
     app.poll_plans()
     # Failed switch changes must show the stored state again.
-    with patch('clam_gui.__main__.Scheduler') as manager:
+    with patch('clam_gui.schedule.Scheduler') as manager:
         manager.return_value.apply.side_effect = RuntimeError('mock schedule failure')
         app.plan_rows[key]['switch'].set_active(True)
         dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
@@ -241,11 +241,12 @@ def check():
         assert len(app.store.history_entries(blocked_key, blocked)) == 1
         notify.assert_called_once()
     # The main screen exposes local definition time and an update-only view.
-    with patch('clam_gui.__main__.definition_update_label', return_value='定義ファイル更新：2026/11/17 08:00'):
+    with patch('clam_gui.definitions.definition_update_label', return_value='定義ファイル更新：2026/11/17 08:00'):
         app.poll_plans()
         assert app.definition_label.get_text() == '定義ファイル更新：2026/11/17 08:00'
         assert app.definition_button.get_sensitive()
         with patch('clam_gui.packages.AptManager') as packages, patch('clam_gui.definitions.DefinitionUpdater.update') as update:
+            packages.return_value.package_names = ('clamav', 'clamav-daemon', 'clamav-freshclam')
             packages.return_value.status.return_value = {'clamav': 'test', 'clamav-daemon': 'test', 'clamav-freshclam': 'test'}
             app.definition_button.emit('clicked')
             window = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '定義ファイルの更新設定')
@@ -333,7 +334,7 @@ def check():
     type_choice = next(w for w in widgets if isinstance(w, Gtk.DropDown) and w.get_model().get_n_items() == 2)
     assert type_choice.get_selected() == 1
     editor.destroy()
-    with patch('clam_gui.__main__.Scheduler') as scheduler:
+    with patch('clam_gui.schedule.Scheduler') as scheduler:
         scheduler.return_value.apply.side_effect = lambda key, schedule: save_schedule(app.store, key, schedule)
         app.plan_rows[watch_key]['switch'].set_active(False)
         wait_until(lambda: not app.schedule_busy)
@@ -388,7 +389,7 @@ def check():
             GLib.MainContext.default().iteration(False)
             time.sleep(.001)
         assert not app.busy
-    with patch('clam_gui.__main__.Scheduler') as manager:
+    with patch('clam_gui.schedule.Scheduler') as manager:
         manager.return_value.apply.side_effect = RuntimeError('mock registration failure')
         save_editor.emit('clicked')
         confirmation(Gtk.ResponseType.OK)
@@ -427,7 +428,7 @@ def check():
             return True
         from clam_gui.background import put_preference, enabled as background_enabled
         background = next(w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() == '常駐監視を有効にする…')
-        with patch('clam_gui.__main__.BackgroundService.apply') as apply:
+        with patch('clam_gui.background.BackgroundService.apply') as apply:
             background.emit('clicked')
             dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
             assert 'ユーザーサービス' in dialog.get_property('secondary-text')
@@ -479,6 +480,7 @@ def check():
         preferences[0].destroy()
         from clam_gui.packages import PackagePlan, PACKAGES
         class FakePackages:
+            package_names = PACKAGES
             installed = True
             executed = 0
             def status(self):

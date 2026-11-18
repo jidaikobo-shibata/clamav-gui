@@ -1,5 +1,6 @@
 """Explicitly enabled, transactional retention of scan history (logical bytes)."""
 import datetime
+from .results import assess
 
 DEFAULTS = dict(media_enabled=False, retention_enabled=False, retention_days=90,
                 alert_days=365, max_mib=256, max_records=10000)
@@ -27,12 +28,12 @@ def prune(db, values, now=None):
     # Compute old records lazily, only after the user opts into retention.
     db.execute('UPDATE scans SET log_bytes=length(CAST(output AS BLOB))+length(CAST(target AS BLOB))+'
                'length(CAST(status AS BLOB))+128 WHERE log_bytes IS NULL')
-    rows = db.execute('SELECT rowid, started, completed_at, status, detected, log_bytes FROM scans '
+    rows = db.execute('SELECT rowid, started, completed_at, status, detected, log_bytes, result_kind FROM scans '
                       'ORDER BY rowid').fetchall()
     expired, normal, important = [], [], []
     total = sum(row[5] for row in rows)
-    for ident, started, completed, status, detected, size in rows:
-        alert = bool(detected) or not status.startswith(('検査完了', '検出なし'))
+    for ident, started, completed, status, detected, size, kind in rows:
+        alert = not assess(status, kind=kind, detected=detected).clean
         days = values['alert_days'] if alert else values['retention_days']
         try:
             stamp = datetime.datetime.fromisoformat(completed or started)

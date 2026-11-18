@@ -4,7 +4,6 @@ import datetime
 import json
 import uuid
 import os
-import fcntl
 import re
 import tempfile
 import threading
@@ -15,6 +14,9 @@ import sqlite3
 import subprocess
 from .retention import DEFAULTS as AUTOMATION_DEFAULTS, validate as validate_automation, prune
 from .runtime import track_scan
+from .platforms import get_backend
+from .settings import Preferences
+from .results import ResultKind, ScanStatus, assess, has_detection, warning_signature, summarize
 from .mailboxes import MAILBOX_NOTE, mailbox_findings, mailbox_guidance
 from .options import DEFAULTS, supported_options, option_arguments, describe_options, LIMITS, validate_limits, limit_arguments, describe_limits
 
@@ -45,7 +47,7 @@ class Store:
             if 'profile_id' not in {row[1] for row in db.execute('PRAGMA table_info(scans)')}:
                 db.execute('ALTER TABLE scans ADD COLUMN profile_id TEXT')
             columns = {row[1] for row in db.execute('PRAGMA table_info(scans)')}
-            for column, kind in [('completed_at', 'TEXT'), ('detected', 'INTEGER'), ('log_bytes', 'INTEGER')]:
+            for column, kind in [('completed_at', 'TEXT'), ('detected', 'INTEGER'), ('log_bytes', 'INTEGER'), ('result_kind', 'TEXT')]:
                 if column not in columns:
                     db.execute(f'ALTER TABLE scans ADD COLUMN {column} {kind}')
             db.execute('CREATE TABLE IF NOT EXISTS profiles '
@@ -58,6 +60,7 @@ class Store:
             db.execute('CREATE TABLE IF NOT EXISTS preferences '
                        '(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
         self.path.chmod(0o600)
+        self.preferences = Preferences(self.connect)
 
     @contextmanager
     def connect(self):
@@ -69,33 +72,30 @@ class Store:
             db.close()
 
     def save(self, started, target, status, output, profile_id=None):
+        result = assess(status, output)
         encoded = output.encode('utf-8')
         if len(encoded) > 2 * 1024 * 1024:
             output = '出力が大きいため末尾のみ保存しています。\n' + encoded[-2*1024*1024:].decode('utf-8', errors='replace')
         size = len((target + status + output).encode('utf-8')) + 128
         policy = self.automation_settings()
         with self.connect() as db:
-            db.execute('INSERT INTO scans (started, target, status, output, profile_id, completed_at, detected, log_bytes) '
-                       'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            db.execute('INSERT INTO scans (started, target, status, output, profile_id, completed_at, detected, log_bytes, result_kind) '
+                       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                        (started, target, status, output, profile_id,
                         datetime.datetime.now().astimezone().isoformat(timespec='seconds'),
-                        int(has_detection(status, output)), size))
+                        int(result.detected), size, result.kind.value))
             prune(db, policy)
 
     def automation_settings(self):
-        with self.connect() as db:
-            row = db.execute('SELECT value FROM preferences WHERE key=?', ('automation',)).fetchone()
         values = dict(AUTOMATION_DEFAULTS)
-        if row:
-            values.update(json.loads(row[0]))
+        values.update(self.preferences.get('automation', {}))
         validate_automation(values)
         return values
 
     def set_automation_settings(self, values):
         validate_automation(values)
         with self.connect() as db:
-            db.execute('INSERT INTO preferences VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                       ('automation', json.dumps(values)))
+            self.preferences.set('automation', values, db)
             return prune(db, values)
 
     def recent(self):
@@ -111,19 +111,18 @@ class Store:
 
     def history_entries(self, key, plan):
         with self.connect() as db:
-            rows = db.execute('SELECT rowid, started, completed_at, detected, target, status, output '
+            rows = db.execute('SELECT rowid, started, completed_at, detected, target, status, output, result_kind '
                               'FROM scans WHERE profile_id=? OR (profile_id IS NULL AND target=?) '
                               'ORDER BY rowid DESC LIMIT 100', (key, plan.describe())).fetchall()
         return [HistoryEntry(*row) for row in rows]
 
     def scan_options(self):
-        with self.connect() as db:
-            rows = dict(db.execute('SELECT key, value FROM preferences'))
+        rows = self.preferences.get_many(['phishing', 'scan-options'])
         settings = dict(DEFAULTS)
         if 'phishing' in rows:
-            settings['phishing-sigs'] = settings['phishing-scan-urls'] = json.loads(rows['phishing'])
+            settings['phishing-sigs'] = settings['phishing-scan-urls'] = rows['phishing']
         if 'scan-options' in rows:
-            saved = json.loads(rows['scan-options'])
+            saved = rows['scan-options']
             if not isinstance(saved, dict) or any(key not in DEFAULTS or type(value) is not bool
                                                   for key, value in saved.items()):
                 raise ValueError('検査設定が不正です。環境設定を確認してください。')
@@ -133,14 +132,10 @@ class Store:
     def set_scan_options(self, settings):
         if set(settings) != set(DEFAULTS) or any(type(value) is not bool for value in settings.values()):
             raise ValueError('検査設定が不正です。')
-        with self.connect() as db:
-            db.execute('INSERT INTO preferences VALUES (?, ?) ON CONFLICT(key) '
-                       'DO UPDATE SET value=excluded.value', ('scan-options', json.dumps(settings)))
+        self.preferences.set('scan-options', settings)
 
     def scan_limits(self):
-        with self.connect() as db:
-            row = db.execute('SELECT value FROM preferences WHERE key=?', ('scan-limits',)).fetchone()
-        values = json.loads(row[0]) if row else {key: None for key in LIMITS}
+        values = self.preferences.get('scan-limits', {key: None for key in LIMITS})
         validate_limits(values)
         return values
 
@@ -153,9 +148,7 @@ class Store:
             if automation is not None:
                 validate_automation(automation)
                 entries.append(('automation', automation))
-            for key, value in entries:
-                db.execute('INSERT INTO preferences VALUES (?, ?) ON CONFLICT(key) '
-                           'DO UPDATE SET value=excluded.value', (key, json.dumps(value)))
+            self.preferences.set_many(dict(entries), db)
             if automation is not None:
                 prune(db, automation)
 
@@ -229,20 +222,6 @@ class Store:
 
 
 
-def warning_signature(line):
-    return any(': ' + prefix in line for prefix in (
-        'Heuristics.Limits.Exceeded.', 'Heuristics.Encrypted.', 'Heuristics.OLE2.ContainsMacros',
-        'Heuristics.Broken.'))
-
-
-def has_detection(status, output):
-    lines = [line for line in output.splitlines() if line.endswith(' FOUND')]
-    if lines:
-        return any(not warning_signature(line) for line in lines)
-    infected = re.search(r'^Infected files:\s*(\d+)\s*$', output, re.M)
-    if infected:
-        return int(infected[1]) > 0
-    return status.startswith('検出あり')
 
 
 @dataclass
@@ -254,6 +233,7 @@ class HistoryEntry:
     target: str
     status: str
     output: str
+    result_kind: str | None = None
 
     def date_label(self):
         value = self.completed_at
@@ -318,48 +298,13 @@ def validate_profile(plan):
 
 
 
-def summarize(code, output, cancelled=False):
-    def total(name):
-        return sum(int(n) for n in re.findall(r'^' + name + r':\s*(\d+)\s*$', output, re.M))
-    found = [line for line in output.splitlines() if line.endswith(' FOUND')]
-    limits = [line for line in found if ': Heuristics.Limits.Exceeded.' in line]
-    encrypted = [line for line in found if ': Heuristics.Encrypted.' in line]
-    warnings = [line for line in found if warning_signature(line)]
-    threats = [line for line in found if line not in warnings]
-    errors = total('Total errors')
-    incomplete = code not in (0, 1) or errors > 0 or 'WARNING:' in output or 'ERROR' in output
-    detected = bool(threats) or (total('Infected files') > 0 and not warnings)
-    if cancelled:
-        title = '検査を中止しました（未検査の対象が残っています）'
-    elif incomplete or limits or encrypted:
-        title = '検出あり・検査不完了' if detected else '検査不完了'
-    elif detected:
-        title = '検出あり：詳細を確認してください'
-    elif warnings:
-        title = '確認が必要です：マクロ・破損などの警告があります'
-    elif code == 1:
-        title = '確認が必要です：ClamAVが警告を返しました'
-    else:
-        title = f"検査完了：{total('Scanned files')}ファイルを検査し、脅威は見つかりませんでした"
-    details = []
-    if limits:
-        details.append(f'サイズ・展開などの検査上限に達した対象が{len(limits)}件あります。完全には検査できていません。')
-    if encrypted:
-        details.append(f'暗号化により内容を確認できない対象が{len(encrypted)}件あります。')
-    if threats:
-        details.append(f'脅威として報告された対象が{len(threats)}件あります。詳細ログを確認してください。')
-    if errors:
-        details.append(f'検査エラーが{errors}件あります。対象と理由は詳細ログを確認してください。')
-    if 'Permission denied' in output:
-        details.append('アクセス権限がないため、読み取れない対象があります。')
-    return '\n'.join([title] + details)
 
 
 def record_scan_failure(store, plan, error, profile_id=None, started=None):
     """Preserve failures that happen before scan() can write its normal result."""
     started = started or datetime.datetime.now().astimezone().isoformat(timespec='seconds')
     reason = str(error).strip() or type(error).__name__
-    status = '検査不完了：' + reason
+    status = ScanStatus('検査不完了：' + reason, ResultKind.INCOMPLETE)
     output = type(error).__name__ + ': ' + reason
     try:
         store.save(started, plan.describe(), status, output, profile_id)
@@ -397,10 +342,9 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
     started = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
     lock_path = Path(lock_path) if lock_path else Path.home() / '.clamdlog/clamscan.lock'
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with lock_path.open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+    lock = get_backend().lock(lock_path)
+    try:
+        if not lock.acquire():
             raise ScanBusyError('別の検査が実行中です。完了後に再実行してください。') from None
         with track_scan(store, profile_id, started) as running:
             command = [binary, '--recursive', '--suppress-ok-results',
@@ -443,11 +387,11 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                         output = 'WARNING: 出力が大きいため末尾2 MiBのみ保存しています。\n' + output
                     status = summarize(code, output, cancelled)
                     if removed or (available is not None and not available()):
-                        status = '検査不完了：検査対象のメディアが取り外されました。'
+                        status = ScanStatus('検査不完了：検査対象のメディアが取り外されました。', ResultKind.INCOMPLETE, has_detection(status, output))
                     if files is not None:
                         output += '\n\n--- 監視による検査ファイル ---\n' + '\n'.join(map(str, files))
                 except OSError as error:
-                    status, output = '検査不完了：ClamAVを実行できませんでした', str(error)
+                    status, output = ScanStatus('検査不完了：ClamAVを実行できませんでした', ResultKind.INCOMPLETE), str(error)
             findings = mailbox_findings(output, plan.targets)
             if findings:
                 status += f'\n{MAILBOX_NOTE}（検出された保存ファイル：{len(findings)}件）'
@@ -459,3 +403,5 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             output += '\n検査上限の警告・ヒューリスティック警告: 有効（固定）\n'
             store.save(started, plan.describe(), status, output, profile_id)
             return status, output
+    finally:
+        lock.close()

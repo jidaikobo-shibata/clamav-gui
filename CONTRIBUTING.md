@@ -2,7 +2,7 @@
 
 この文書は、macOS担当者と、その担当者が利用するCodexへの作業指示です。
 Windows担当者は[Windows担当Codexへの依頼](docs/WINDOWS_HANDOFF.md)を読んでください。
-README.mdと既存コードを読んだうえで、以下に沿って実装してください。
+README.mdと[コードの責務とOS移植の入口](docs/ARCHITECTURE.md)、既存コードを読んだうえで、以下に沿って実装してください。
 Ubuntuの実装を維持しながら、macOSで日常的に使える状態へ移植することが目的です。
 計画の説明だけで終えず、小さな単位で実装・検証・記録を進めてください。
 
@@ -68,20 +68,20 @@ macOS版は未実装・未検証です。Ubuntu版が動くことはmacOS版の�
 
 | ファイル | 役割と移植上の注意 |
 |---|---|
-| `clam_gui/__main__.py` | GUI、起動案内、導入・更新画面。現在はUbuntu用クラスを直接利用しているので、OSに応じた実装を接続する |
+| `clam_gui/__main__.py` | メイン画面と画面間の接続。画面別の処理は `ui/` に分割済み。OS連携は `platforms.get_backend()` へ追加する |
 | `clam_gui/core.py` | SQLite、プラン・設定・履歴、検査実行、開始失敗の保存。既存IDと履歴を維持する |
 | `clam_gui/options.py` | 許可した検査オプション・サイズ上限、実際のClamAVのhelpからの対応/初期値確認 |
 | `clam_gui/mailboxes.py` | mboxの保守的な形式判定と、保存ファイル全体を削除しない案内 |
 | `clam_gui/packages.py` | APT・dpkg・pkexec・Linuxのcgroup。macOSでこの実装を実行しない |
 | `clam_gui/definitions.py` | 定義の日時表示、FreshClamのsystemd管理、journal解析。一式をmacOS方式へ対応させる |
 | `clam_gui/schedule.py` | ユーザーsystemdのunit生成・登録・解除。固定 `/usr/bin/python3` を含む |
-| `clam_gui/runtime.py` | GUI/CLI共有の実行記録と中止依頼。現在の生存確認はLinuxの `/proc` とboot ID/start time |
+| `clam_gui/runtime.py` | GUI/CLI共有の実行記録と中止依頼。生存確認はバックエンドへ委譲。Linux実装は `platforms/linux.py` の `/proc` とboot ID/start time |
 | `clam_gui/notifications.py` | 通知文と定義状態。定義の既定パスはLinux向け |
 | `scripts/run_scheduled.py` | GTKを読み込まない検査CLI。現在の配送は `notify-send` |
 | `scripts/launch_gui.py`, `scripts/install_launcher.py` | LinuxのDesktop Entry起動。Finder用の起動方法は別途必要 |
 | `scripts/smoke_gui.py` | Ubuntu用の独立Wayland/Weston・D-Bus検証。macOSで実行する手順にはしない |
 
-OS差分は小さなバックエンド/アダプターへ分離し、共通UIと検査ロジックを維持してください。
+`platforms.get_backend()` の共通の呼び出し口へmacOS実装を追加し、共通UIと検査ロジックを維持してください。
 設計例としてOS別のpaths・packages・definitions・scheduler・notifications・process identityが考えられますが、
 この例どおりに全構造を先に作り込む必要はありません。段階ごとに動く最小限の分離を選んでください。
 Ubuntuで使う保存場所・アプリID・unit名・共通ロックの意味を不必要に変更しないでください。

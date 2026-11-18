@@ -50,6 +50,8 @@ class PackagePlan:
 
 
 class AptManager:
+    package_names = PACKAGES
+
     def __init__(self, run=None, release=Path('/etc/os-release')):
         self.run = run or subprocess.run
         self.release = Path(release)

@@ -1,28 +1,31 @@
 """Run with /usr/bin/python3 -m clam_gui."""
+from .notifications import AutomaticNotices
 from dataclasses import replace
-from pathlib import Path
 import threading
-import time
 import shutil
 import gi
 
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gio, GLib, Gtk, Pango
-from .core import Store, Plan, engine_status, scan, record_scan_failure
-from .options import OPTIONS, supported_options, standard_defaults, option_arguments, LIMITS, limit_arguments
-from .schedule import Schedule, Scheduler, read_schedule
+from .core import Store, scan, record_scan_failure
+from .jobs import execute_scan
+from .schedule import Schedule, read_schedule, read_schedules
 from .automation import Automation, MEDIA_ID, media_plan
-from .gio_watch import Observers
-from .retention import validate as validate_automation
-from .background import BackgroundService, Lease, enabled as background_enabled, heartbeat, request_media, watched_plans
+from .background import Lease, enabled as background_enabled, heartbeat, request_media, watched_plans
+from .platforms import get_backend
 from .runtime import activities, request_stop
-from .definitions import definition_update_label, AutoUpdateService, AutoUpdateState
+
+from .ui.plans import PlanEditor
+from .ui.preferences import PreferencesWindow
+from .ui.packages import PackageWindow
+from .ui.history import HistoryView
 
 
-class Application(Gtk.Application):
+class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk.Application):
     def __init__(self):
         super().__init__(application_id='com.jidaikobo.ClamAVGui')
         self.store = Store()
+        self.backend = get_backend()
         self.busy = False
         self.cancel = threading.Event()
         self.scan_key = None
@@ -135,11 +138,11 @@ class Application(Gtk.Application):
         self.refreshing_profiles = False
         self.action_key = None
         self.log_entries = []
-        self.automatic_notices = {}
+        self.automatic_notices = AutomaticNotices()
         self.automatic_notice_timers = {}
         self.monitor_lease = Lease(self.store)
         self.automation = Automation(self.store, GLib.idle_add, self.automatic_finished, lambda: self.history(None))
-        self.observers = Observers(self.automation)
+        self.observers = self.backend.observers(self.automation)
         self.refresh_profiles()
         self.automation_timer = GLib.timeout_add(500, self.tick_automation)
         self.state_timer = GLib.timeout_add_seconds(1, self.poll_plans)
@@ -277,8 +280,9 @@ class Application(Gtk.Application):
         self.poll_plans()
 
     def poll_plans(self):
-        if background_enabled(self.store):
-            remote = heartbeat(self.store)
+        background = background_enabled(self.store)
+        remote = heartbeat(self.store) if background else {}
+        if background:
             revision = (remote.get('generation'), remote.get('revision'))
             if revision != getattr(self, 'monitor_revision', None):
                 self.monitor_revision = revision
@@ -292,7 +296,7 @@ class Application(Gtk.Application):
                     self.show_notice(f'接続済みの外部メディア{count}件を検査待ちに追加しました。' if count else '検査できる外部メディアが接続されていません。')
                     self.media_request_token = None
         self.refresh_auto_status()
-        self.definition_label.set_text(definition_update_label())
+        self.definition_label.set_text(self.backend.definition_label())
         self.definition_button.set_sensitive(not self.busy and not self.schedule_busy)
         self.new_action.set_enabled(not self.busy and not self.schedule_busy)
         try:
@@ -302,15 +306,22 @@ class Application(Gtk.Application):
         except Exception:
             failed = True
             previous = None
+        try:
+            schedules = read_schedules(self.store)
+            media_enabled = self.store.automation_settings()['media_enabled']
+        except Exception:
+            schedules, media_enabled = None, False
         for key, widgets in self.plan_rows.items():
             try:
-                schedule = read_schedule(self.store, key)
+                if schedules is None:
+                    raise ValueError('予定を確認できません')
+                schedule = schedules.get(key, Schedule())
                 if widgets['plan'].kind == 'media':
-                    schedule = replace(schedule, enabled=self.store.automation_settings()['media_enabled'])
+                    schedule = replace(schedule, enabled=media_enabled)
                 description = replace(schedule, enabled=True).describe().removeprefix('定期検査：')
                 description = description.replace('（端末の現地時刻）', '').strip()
                 if widgets['plan'].kind != 'scheduled':
-                    description = ('外部メディア接続時' if key == MEDIA_ID else '追加・変更時') + ('（ログイン中）' if background_enabled(self.store) else '（画面を開いている間）')
+                    description = ('外部メディア接続時' if key == MEDIA_ID else '追加・変更時') + ('（ログイン中）' if background else '（画面を開いている間）')
                 if not schedule.enabled:
                     description += '・停止中'
                 widgets['schedule'].set_text(description)
@@ -325,7 +336,7 @@ class Application(Gtk.Application):
             unknown = failed or bool(running and not running.known)
             automatic = widgets['plan'].kind != 'scheduled' and schedule is not None and schedule.enabled
             widgets['status_box'].set_visible(bool(running) or unknown or automatic)
-            widgets['status'].set_text('実行状態を確認できません' if unknown else running.describe() if running else self.monitor_status(key) if automatic else '')
+            widgets['status'].set_text('実行状態を確認できません' if unknown else running.describe() if running else self.monitor_status(key, background, remote) if automatic else '')
             widgets['spinner'].set_spinning(bool(running and running.known and not running.stopping))
             widgets['spinner'].set_visible(bool(running and running.known))
             blocked = self.schedule_busy or (self.busy and self.scan_key is None)
@@ -392,7 +403,7 @@ class Application(Gtk.Application):
             def worker():
                 error = None
                 try:
-                    Scheduler(self.store).apply(key, schedule)
+                    self.backend.scheduler(self.store).apply(key, schedule)
                 except Exception as failure:
                     error = '予定を変更できませんでした：' + str(failure)
                 def finished():
@@ -465,9 +476,10 @@ class Application(Gtk.Application):
         self.automation.configure(watches, self.store.automation_settings()['media_enabled'])
         self.observers.configure(watches)
 
-    def monitor_status(self, key):
-        if background_enabled(self.store):
-            state = heartbeat(self.store)
+    def monitor_status(self, key, background=None, remote=None):
+        background = background_enabled(self.store) if background is None else background
+        if background:
+            state = heartbeat(self.store) if remote is None else remote
             if not state:
                 return '常駐監視に接続できません。環境設定で確認してください。'
             return state.get('statuses', {}).get(key, '常駐監視へ設定を反映中…').replace('アプリ起動中のみ', 'ログイン中')
@@ -481,658 +493,34 @@ class Application(Gtk.Application):
             self.automation.tick(blocked=self.busy or self.schedule_busy or bool(self.active_runs))
         return True
 
-    def background_controls(self, content):
-        service = BackgroundService(self.store)
-        state = Gtk.Label(xalign=0, wrap=True)
-        content.append(state)
-        control = Gtk.Button(halign=Gtk.Align.START)
-        content.append(control)
-        content.append(Gtk.Label(label='有効にするとログイン時から、画面を閉じても監視します。ログアウト時は停止します。\n'
-            '初回は比較元を作成し、次回起動・スリープ復帰時は前回からの追加・変更も確認します。\n'
-            '停止中に作成・削除されたファイルや、接続・取り外しされたメディアは後から検査できません。',
-            xalign=0, wrap=True))
-        def refresh():
-            active = background_enabled(self.store)
-            connected = bool(heartbeat(self.store))
-            state.set_text('常駐監視：' + ('稼働中（ログイン中）' if connected and active else
-                '有効・接続できません。再起動するかシステムのユーザーサービスを確認してください。' if active else
-                '無効（画面を開いている間だけ監視します）'))
-            control.set_label('常駐監視を無効にする…' if active else '常駐監視を有効にする…')
-            control.set_sensitive(service.supported() and not self.schedule_busy)
-            return True
-        refresh()
-        restart = Gtk.Button(label='常駐監視を再起動…', halign=Gtk.Align.START)
-        content.append(restart)
-        def change(enable):
-            if self.schedule_busy or self.automation.active:
-                self.show_notice('処理中です。監視の検査が終わってから変更してください。')
-                return
-            dialog = Gtk.MessageDialog(transient_for=content.get_root(), modal=True,
-                message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
-                text='ログイン中の常駐監視を有効にしますか？' if enable else '常駐監視を停止して無効にしますか？',
-                secondary_text=('ユーザーサービスを登録・起動します。次回ログイン時も起動します。再起動の場合、実行中の自動検査は中止します。管理者権限は不要です。' if enable else
-                    'ユーザーサービスを停止し、自動起動を解除します。実行中の自動検査も中止します。画面が開いていれば画面側の監視に戻ります。')+
-                    '\n変更する設定：'+str(service.path)+'\nClamAV本体・定義更新・定期検査のサービスは変更しません。')
-            def response(window, result):
-                window.destroy()
-                if result != Gtk.ResponseType.OK:
-                    return
-                self.schedule_busy = True
-                refresh()
-                def worker():
-                    try:
-                        service.apply(enable)
-                        error = None
-                    except Exception as caught:
-                        error = str(caught)
-                    def done():
-                        self.schedule_busy = False
-                        self.configure_automation()
-                        refresh()
-                        state.set_text(('変更できませんでした：'+error) if error else
-                            ('常駐監視を有効にしました。起動状態は数秒後に反映されます。' if enable else '常駐監視を無効にしました。'))
-                        return False
-                    GLib.idle_add(done)
-                threading.Thread(target=worker, daemon=True).start()
-            dialog.connect('response', response)
-            dialog.present()
-        control.connect('clicked', lambda _: change(not background_enabled(self.store)))
-        restart.connect('clicked', lambda _: change(True))
-        def update():
-            if not content.get_root():
-                return False
-            refresh()
-            restart.set_sensitive(background_enabled(self.store) and service.supported() and not self.schedule_busy)
-            return True
-        restart.set_sensitive(background_enabled(self.store) and service.supported() and not self.schedule_busy)
-        GLib.timeout_add_seconds(3, update)
 
     def automatic_finished(self, key, status, output, label=None):
         self.history(None)
         self.poll_plans()
-        if status.startswith('検査完了'):
-            self.automatic_notices[key] = self.automatic_notices.get(key, 0) + 1
-            if key not in self.automatic_notice_timers:
-                self.automatic_notice_timers[key] = GLib.timeout_add_seconds(20, self.flush_automatic_notice, key, True)
-        else:
-            notification = Gio.Notification.new('ClamAV 自動検査の結果')
-            notification.set_body((label or ('外部メディア検査' if key == MEDIA_ID else 'フォルダー監視')) + '\n' +
-                                  status + '\n検査プランのログを確認してください。')
+        plan = media_plan() if key == MEDIA_ID else dict(self.store.profiles()).get(key)
+        label = plan.label if plan else label or '検査プラン'
+        notice = self.automatic_notices.record(key, label, status, output)
+        if notice:
+            self.deliver_automatic_notice(key, notice)
+        elif key not in self.automatic_notice_timers:
+            self.automatic_notice_timers[key] = GLib.timeout_add_seconds(20, self.flush_automatic_notice, key, True)
+
+    def deliver_automatic_notice(self, key, notice):
+        notification = Gio.Notification.new(notice.title)
+        notification.set_body(notice.body)
+        if notice.urgency == 'critical':
             notification.set_priority(Gio.NotificationPriority.HIGH)
-            self.send_notification('automatic-' + key, notification)
+        self.send_notification('automatic-' + key, notification)
 
     def flush_automatic_notice(self, key, from_timer=False):
         timer = self.automatic_notice_timers.pop(key, None)
         if timer and not from_timer:
             GLib.source_remove(timer)
-        count = self.automatic_notices.pop(key, 0)
-        if count:
-            plan = media_plan() if key == MEDIA_ID else dict(self.store.profiles()).get(key)
-            notification = Gio.Notification.new('ClamAV 自動検査完了')
-            notification.set_body((plan.label if plan else '検査プラン') + f'：{count}回の検査が正常に完了しました。')
-            self.send_notification('automatic-' + key, notification)
+        notice = self.automatic_notices.flush(key)
+        if notice:
+            self.deliver_automatic_notice(key, notice)
         return False
 
-    def automation_preferences(self, pages):
-        values = self.store.automation_settings()
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                          margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
-        scroll = Gtk.ScrolledWindow(vexpand=True)
-        scroll.set_child(content)
-        pages.append_page(scroll, Gtk.Label(label='自動検査・履歴'))
-        self.background_controls(content)
-        media = Gtk.CheckButton(label='外部メディア検査を実施する', active=values['media_enabled'])
-        content.append(media)
-        content.append(Gtk.Label(label='接続後に読み取り可能になったUSBメモリーやデータCD/DVDを検査します。\n'
-            'オンにすると左ペインに専用プランを表示します。既に接続済みのものは専用プランの「今すぐ検査」から検査できます。\n'
-            'オフでも実行中の検査は続行します。メディアの利用は禁止しません。', wrap=True, xalign=0))
-        history = Gtk.Button(label='外部メディアの保存済み履歴を表示')
-        history.connect('clicked', lambda _: self.media_history())
-        content.append(history)
-        retention = Gtk.CheckButton(label='履歴の保存上限を有効にする', active=values['retention_enabled'])
-        content.append(retention)
-        fields = {}
-        for key, title, low, high in [('retention_days', '通常結果の保存日数', 1, 3650),
-                                      ('alert_days', '検出・不完了の保存日数', 1, 3650),
-                                      ('max_mib', '履歴本文の上限（MiB）', 16, 4096),
-                                      ('max_records', '履歴件数の上限', 100, 100000)]:
-            row = Gtk.Box(spacing=12)
-            row.append(Gtk.Label(label=title, xalign=0, hexpand=True))
-            spin = Gtk.SpinButton.new_with_range(low, high, 1)
-            spin.set_value(values[key])
-            spin.update_property([Gtk.AccessibleProperty.LABEL], [title])
-            fields[key] = spin
-            row.append(spin)
-            content.append(row)
-        content.append(Gtk.Label(label='保存時に確認してから適用します。古い通常結果から整理し、容量・件数超過時は検出・不完了も削除対象です。\n'
-            '本文の論理容量の上限です。SQLiteファイルは削除直後に縮まず、空き領域を再利用します。\n'
-            'フォルダー監視は検査待ち1000件、1回50ファイル、監視フォルダー最大1024です。上限超過は不完了として記録します。\n'
-            '正常な自動検査の通知は20秒ごとにまとめます。監視停止中や監視準備中の取りこぼし対策として定期的な全体検査を併用してください。',
-            xalign=0, wrap=True))
-        def read():
-            return dict(media_enabled=media.get_active(), retention_enabled=retention.get_active(),
-                        **{key: spin.get_value_as_int() for key, spin in fields.items()})
-        return read
-
-    def media_history(self):
-        window = Gtk.Window(application=self, title='外部メディア検査の履歴', transient_for=self.operation_parent(), modal=True)
-        window.set_default_size(780, 550)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12,
-                      margin_bottom=12, margin_start=12, margin_end=12)
-        window.set_child(box)
-        stop = Gtk.Button(label='実行中の外部メディア検査を中止')
-        stop.connect('clicked', lambda _: self.stop_plan(MEDIA_ID))
-        box.append(stop)
-        text = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
-        entries = self.store.history_entries(MEDIA_ID, media_plan())
-        text.get_buffer().set_text('\n\n'.join(entry.date_label() + '\n' + entry.status + '\n' + entry.target + '\n' + entry.output
-                                                 for entry in entries) or '検査記録はありません。')
-        scroll = Gtk.ScrolledWindow(vexpand=True)
-        scroll.set_child(text)
-        box.append(scroll)
-        close = Gtk.Button(label='閉じる')
-        close.connect('clicked', lambda _: window.destroy())
-        box.append(close)
-        window.present()
-
-    def show_auto_status(self, status):
-        self.auto_generation += 1
-        self.auto_status = status
-        self.definition_button.set_label(status.label() + '…')
-        self.definition_button.set_tooltip_text('定義ファイルの更新設定を開きます。\n' + status.frequency() +
-                                               ('\n' + status.detail if status.detail else ''))
-
-    def refresh_auto_status(self, force=False):
-        if self.auto_checking or (not force and self.auto_checked_at is not None and
-                                 time.monotonic() - self.auto_checked_at < 15):
-            return
-        self.auto_checking = True
-        generation = self.auto_generation
-        def worker():
-            try:
-                status = AutoUpdateService().status()
-            except Exception as error:
-                status = AutoUpdateState(detail=str(error))
-            def finished():
-                self.auto_checking = False
-                self.auto_checked_at = time.monotonic()
-                if generation == self.auto_generation:
-                    self.show_auto_status(status)
-                return False
-            GLib.idle_add(finished)
-        threading.Thread(target=worker, daemon=True).start()
-
-    def package_setup(self, manager=None, updater=None, update_only=False, auto_manager=None):
-        from .packages import AptManager, PACKAGES
-        from .notifications import definition_status
-        manager = manager or AptManager()
-        from .definitions import DefinitionUpdater
-        updater = updater or DefinitionUpdater()
-        auto_manager = auto_manager or AutoUpdateService()
-        window = Gtk.Window(application=self, title='定義ファイルの更新設定' if update_only else 'ClamAVの管理',
-                            transient_for=self.operation_parent(), modal=True)
-        window.set_default_size(720, 580)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                      margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
-        window.set_child(box)
-        status = Gtk.Label(label='更新機能の状態を確認しています…' if update_only else '導入状態を確認しています…',
-                           xalign=0, wrap=True, selectable=True)
-        box.append(status)
-        explanation = ('既存のFreshClam自動更新サービスを利用して、定義ファイルを取得・更新します。'
-                       if update_only else 'ClamAVは、このGUI以外のアプリも利用する共通のソフトウェアです。\n'
-                       '削除すると、ClamAVを利用する他のアプリの検査も使えなくなります。')
-        box.append(Gtk.Label(label=explanation, xalign=0, wrap=True))
-        controls = Gtk.Box(spacing=8, homogeneous=True)
-        install = Gtk.Button(label='インストール')
-        remove = Gtk.Button(label='アンインストール')
-        remove.add_css_class('destructive-action')
-        controls.append(install)
-        controls.append(remove)
-        box.append(controls)
-        controls.set_visible(not update_only)
-        auto_row = Gtk.Box(spacing=12)
-        auto_row.append(Gtk.Label(label='定義ファイルの自動更新', xalign=0, hexpand=True))
-        auto_switch = Gtk.Switch(valign=Gtk.Align.CENTER, sensitive=False)
-        auto_switch.update_property([Gtk.AccessibleProperty.LABEL], ['定義ファイルの自動更新'])
-        auto_row.append(auto_switch)
-        box.append(auto_row)
-        auto_details = Gtk.Label(label='自動更新の状態を確認しています…', xalign=0, wrap=True)
-        box.append(auto_details)
-        update_controls = Gtk.Box(spacing=8)
-        update = Gtk.Button(label='今すぐ更新を確認', hexpand=True)
-        stop_monitor = Gtk.Button(label='監視を終了', sensitive=False)
-        update_controls.append(update)
-        update_controls.append(stop_monitor)
-        box.append(update_controls)
-        progress = Gtk.Spinner(halign=Gtk.Align.START)
-        box.append(progress)
-        message = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        box.append(message)
-        output = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
-        output.update_property([Gtk.AccessibleProperty.LABEL], ['ClamAV管理の処理結果'])
-        scroll = Gtk.ScrolledWindow(vexpand=True)
-        scroll.set_child(output)
-        box.append(scroll)
-        refresh = Gtk.Button(label='状態を再確認')
-        box.append(refresh)
-        close = Gtk.Button(label='閉じる')
-        close.connect('clicked', lambda _: window.close())
-        box.append(close)
-        state = {'running': False, 'closed': False, 'installed': {}, 'updating': False, 'cancel': threading.Event(), 'auto': None, 'setting_switch': False, 'temporary_update': False}
-        def close_request(_window):
-            if state['updating']:
-                state['cancel'].set()
-                message.set_text('更新を中断し、一時起動したサービスを停止しています…' if state['temporary_update'] else
-                                 '監視を終了しています。更新サービスは停止しません。')
-                return True
-            if state['running']:
-                message.set_text('処理中です。完了までお待ちください。OSのパッケージ処理は途中で終了しません。')
-                return True
-            state['closed'] = True
-            return False
-        window.connect('close-request', close_request)
-        def buttons():
-            ready = not state['running'] and not self.busy
-            install.set_sensitive(ready and len(state['installed']) < len(PACKAGES))
-            remove.set_sensitive(ready and bool(state['installed']))
-            update.set_sensitive(ready and 'clamav-freshclam' in state['installed'] and
-                                 bool(state['auto'] and state['auto'].manageable))
-            refresh.set_sensitive(ready)
-            auto_switch.set_sensitive(ready and bool(state['auto'] and state['auto'].manageable))
-        def check_state():
-            install.set_sensitive(False)
-            remove.set_sensitive(False)
-            update.set_sensitive(False)
-            refresh.set_sensitive(False)
-            auto_switch.set_sensitive(False)
-            def worker():
-                try:
-                    auto_state = auto_manager.status()
-                except Exception as auto_error:
-                    auto_state = AutoUpdateState(detail=str(auto_error))
-                try:
-                    installed = manager.status()
-                    lines = [package + ': ' + installed.get(package, '未導入') for package in PACKAGES]
-                    text = (definition_update_label() + '\n' + definition_status() if update_only else
-                            '\n'.join(lines) + '\n\n' + definition_status())
-                    if not update_only and len(installed) == len(PACKAGES):
-                        text += '\n初回導入後は、定義ファイルの更新が終わってから検査してください。'
-                    error = None
-                except Exception as exception:
-                    installed, text, error = {}, str(exception), exception
-                def finished():
-                    if state['closed']:
-                        return False
-                    state['installed'] = installed
-                    state['auto'] = auto_state
-                    state['setting_switch'] = True
-                    auto_switch.set_active(auto_state.enabled is True)
-                    auto_switch.set_state(auto_state.enabled is True)
-                    state['setting_switch'] = False
-                    auto_details.set_text(auto_state.label() + '\n' + auto_state.frequency() +
-                                          ('\n' + auto_state.detail if auto_state.detail else ''))
-                    self.show_auto_status(auto_state)
-                    status.set_text(text)
-                    if error is None:
-                        buttons()
-                        if update_only and 'clamav-freshclam' not in installed:
-                            message.set_text('FreshClamが未導入です。メインメニューの「ClamAVの管理」からインストールしてください。')
-                    else:
-                        message.set_text('この環境では定義ファイルの更新を開始できません。' if update_only else
-                                         'この環境では導入・削除を実行できません。')
-                        refresh.set_sensitive(True)
-                    return False
-                GLib.idle_add(finished)
-            threading.Thread(target=worker, daemon=True).start()
-        def release():
-            state['running'] = False
-            state['updating'] = False
-            state['temporary_update'] = False
-            stop_monitor.set_label('監視を終了')
-            stop_monitor.set_sensitive(False)
-            self.busy = False
-            self.set_controls(True)
-            progress.stop()
-            close.set_sensitive(True)
-            buttons()
-        def execute(plan, confirmation):
-            confirmation.destroy()
-            message.set_text('管理者認証後に処理します。ダウンロードやパッケージ処理の完了までお待ちください。')
-            def worker():
-                install_succeeded = False
-                try:
-                    text, code = manager.execute(plan)
-                    after = manager.status()
-                    expected = len(after) == len(PACKAGES) if plan.action == 'install' else not after
-                    if code == 0 and expected:
-                        install_succeeded = plan.action == 'install'
-                        result = 'インストールが完了しました。「今すぐ更新を確認」で更新状態を確認してください。' if plan.action == 'install' else 'アンインストールが完了しました。'
-                    else:
-                        result = '処理が完了していません。管理者認証と下の詳細・現在の状態を確認してください。'
-                except Exception as error:
-                    text, result = str(error), '処理を完了できませんでした。下の詳細を確認してください。'
-                def finished():
-                    output.get_buffer().set_text(text)
-                    message.set_text(result)
-                    release()
-                    check_state()
-                    if install_succeeded:
-                        message.set_text(result + '\n自動更新の状態を確認し、無効ならスイッチで有効にしてください。')
-                    return False
-                GLib.idle_add(finished)
-            threading.Thread(target=worker, daemon=True).start()
-        def confirm(plan):
-            confirmation = Gtk.Window(application=self, title='ClamAVの変更内容を確認', transient_for=window, modal=True)
-            confirmation.set_default_size(700, 550)
-            area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
-            confirmation.set_child(area)
-            detail = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
-            detail.update_property([Gtk.AccessibleProperty.LABEL], ['変更対象と影響'])
-            detail.get_buffer().set_text(plan.describe())
-            scroll = Gtk.ScrolledWindow(vexpand=True)
-            scroll.set_child(detail)
-            area.append(scroll)
-            advanced = Gtk.Expander(label='詳細な処理予定（APTの出力）')
-            raw = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
-            raw.update_property([Gtk.AccessibleProperty.LABEL], ['APTの事前確認結果'])
-            raw.get_buffer().set_text(plan.detail)
-            raw_scroll = Gtk.ScrolledWindow(min_content_height=130, max_content_height=180)
-            raw_scroll.set_child(raw)
-            advanced.set_child(raw_scroll)
-            area.append(advanced)
-            agreed = Gtk.CheckButton(label='変更対象と、他のアプリへの影響を確認しました')
-            area.append(agreed)
-            actions = Gtk.Box(spacing=8, homogeneous=True)
-            cancel = Gtk.Button(label='キャンセル')
-            run = Gtk.Button(label='管理者認証して実行', sensitive=False)
-            agreed.connect('toggled', lambda check: run.set_sensitive(check.get_active()))
-            actions.append(cancel)
-            actions.append(run)
-            area.append(actions)
-            def cancelled(*_):
-                release()
-                message.set_text('変更をキャンセルしました。')
-                confirmation.destroy()
-                return True
-            cancel.connect('clicked', cancelled)
-            confirmation.connect('close-request', cancelled)
-            run.connect('clicked', lambda _: execute(plan, confirmation))
-            confirmation.present()
-        def prepare(action):
-            if self.busy:
-                message.set_text('別の処理が実行中です。完了後に再実行してください。')
-                return
-            self.busy = True
-            state['running'] = True
-            self.set_controls(False)
-            buttons()
-            close.set_sensitive(False)
-            progress.start()
-            message.set_text('変更予定を確認しています。まだインストール・削除は実行していません。')
-            def worker():
-                try:
-                    plan, error = manager.preview(action), None
-                except Exception as exception:
-                    plan, error = None, str(exception)
-                def finished():
-                    if error is not None:
-                        output.get_buffer().set_text(error)
-                        message.set_text('変更予定を確認できませんでした。')
-                        release()
-                    elif not plan.changes:
-                        message.set_text('変更は不要です。')
-                        release()
-                        check_state()
-                    else:
-                        progress.stop()
-                        confirm(plan)
-                    return False
-                GLib.idle_add(finished)
-            threading.Thread(target=worker, daemon=True).start()
-        def change_auto(_switch, enabled):
-            if state['setting_switch']:
-                return True
-            if state['running'] or self.busy or not state['auto'] or not state['auto'].manageable:
-                check_state()
-                return True
-            if state['auto'].enabled == enabled and state['auto'].running == enabled:
-                return True
-            detail = ('OS起動時の自動起動を有効にして、更新サービスを開始します。アプリを閉じても動きます。'
-                      if enabled else '更新サービスを停止し、OS起動時の自動起動も無効にします。取得中の処理があれば中断します。')
-            detail += '\nこの端末でClamAVを使う他の機能にも影響します。管理者認証が必要な場合があります。'
-            dialog = Gtk.MessageDialog(transient_for=window, modal=True, message_type=Gtk.MessageType.QUESTION,
-                buttons=Gtk.ButtonsType.OK_CANCEL, text='自動更新を有効にしますか？' if enabled else '自動更新を無効にしますか？',
-                secondary_text=detail)
-            def response(d, answer):
-                d.destroy()
-                if answer != Gtk.ResponseType.OK or self.busy:
-                    check_state()
-                    return
-                self.busy = True
-                state['running'] = True
-                self.set_controls(False)
-                buttons()
-                progress.start()
-                message.set_text('自動更新の設定を変更しています…')
-                def worker():
-                    try:
-                        result, _ = auto_manager.set_enabled(enabled)
-                    except Exception as error:
-                        result = '自動更新の設定を変更できませんでした：' + str(error)
-                    def finished():
-                        message.set_text(result)
-                        release()
-                        check_state()
-                        return False
-                    GLib.idle_add(finished)
-                threading.Thread(target=worker, daemon=True).start()
-            dialog.connect('response', response)
-            dialog.present()
-            return True
-        auto_switch.connect('state-set', change_auto)
-        def begin_update():
-            if self.busy:
-                message.set_text('別の処理が実行中です。完了後に再実行してください。')
-                return
-            temporary = bool(state['auto'] and state['auto'].enabled is False and state['auto'].running is False)
-            dialog = Gtk.MessageDialog(application=self, transient_for=window, modal=True,
-                message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
-                text='定義ファイルを取得・更新しますか？',
-                secondary_text='自動更新サービスを利用して、公式の更新先へ接続します。\n'
-                    '既存のサービスを使い、別のFreshClamを並行起動しません。\n'
-                    '管理者認証が必要な場合があります。取得中の場合はその処理を監視します。' +
-                    ('\n自動更新は無効のまま、一時的にサービスを起動します。完了・監視終了・エラー時に停止します。' if temporary else ''))
-            def response(d, answer):
-                d.destroy()
-                if answer != Gtk.ResponseType.OK or self.busy:
-                    return
-                self.busy = True
-                state['running'] = state['updating'] = True
-                state['temporary_update'] = temporary
-                stop_monitor.set_label('更新を中断' if temporary else '監視を終了')
-                state['cancel'].clear()
-                self.set_controls(False)
-                buttons()
-                stop_monitor.set_sensitive(True)
-                progress.start()
-                message.set_text('定義ファイルの取得・更新を確認しています…')
-                def report(text):
-                    GLib.idle_add(output.get_buffer().set_text, text)
-                def worker():
-                    try:
-                        options = {'restore_stopped': True} if temporary else {}
-                        result, text = updater.update(cancel=state['cancel'], progress=report, **options)
-                    except Exception as error:
-                        result, text = '定義の取得・更新を確認できませんでした。', str(error)
-                    def finished():
-                        output.get_buffer().set_text(text)
-                        message.set_text(result)
-                        release()
-                        check_state()
-                        return False
-                    GLib.idle_add(finished)
-                threading.Thread(target=worker, daemon=True).start()
-            dialog.connect('response', response)
-            dialog.present()
-        update.connect('clicked', lambda _: begin_update())
-        stop_monitor.connect('clicked', lambda _: state['cancel'].set())
-        install.connect('clicked', lambda _: prepare('install'))
-        remove.connect('clicked', lambda _: prepare('remove'))
-        refresh.connect('clicked', lambda _: check_state())
-        window.present()
-        check_state()
-
-    def preferences(self):
-        window = Gtk.Window(application=self, title='環境設定', transient_for=self.operation_parent(), modal=True)
-        window.set_default_size(700, 650)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                      margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
-        window.set_child(box)
-        state = Gtk.Label(label='ClamAVの対応項目を確認しています…', xalign=0, wrap=True, selectable=True)
-        box.append(state)
-        box.append(Gtk.Label(label='全プランの次回以降の手動・定期検査に共通適用します。\n'
-            '形式の解析を無効にしても、その拡張子のファイル全体を除外する意味ではありません。',
-            xalign=0, wrap=True))
-        pages = Gtk.Notebook(vexpand=True)
-        box.append(pages)
-        read_automation = self.automation_preferences(pages)
-        settings = self.store.scan_options()
-        controls = {}
-        for group in ('ファイル形式', '検出方法', '警告'):
-            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
-            scroll = Gtk.ScrolledWindow(vexpand=True)
-            scroll.set_child(content)
-            pages.append_page(scroll, Gtk.Label(label=group))
-            for option in OPTIONS:
-                if option.group != group:
-                    continue
-                check = Gtk.CheckButton(label=option.label, active=settings[option.key], sensitive=False)
-                check.set_tooltip_text(option.description + '\n--' + option.key)
-                controls[option.key] = check
-                content.append(check)
-                content.append(Gtk.Label(label=option.description, xalign=0, wrap=True, margin_start=24))
-            if group == '警告':
-                content.append(Gtk.Label(label='検査上限への到達とヒューリスティック警告は有効に固定します。\n'
-                    '暗号化の報告を無効にしても、その内容を検査できるようにはなりません。', xalign=0, wrap=True))
-        limit_values = self.store.scan_limits()
-        limit_controls = {}
-        limit_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16,
-                            margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
-        pages.append_page(limit_page, Gtk.Label(label='サイズ上限'))
-        for key, (label, explanation) in LIMITS.items():
-            limit_page.append(Gtk.Label(label=label, xalign=0))
-            limit_page.append(Gtk.Label(label=explanation, xalign=0, wrap=True))
-            row_limits = Gtk.Box(spacing=12)
-            standard = Gtk.CheckButton(label='ClamAV標準値を使う', active=limit_values[key] is None)
-            standard.update_property([Gtk.AccessibleProperty.LABEL], [label + 'にClamAV標準値を使う'])
-            spin = Gtk.SpinButton.new_with_range(1, 2047, 1)
-            spin.set_value(limit_values[key] or 100)
-            spin.set_numeric(True)
-            spin.update_property([Gtk.AccessibleProperty.LABEL], [label + '（MiB）'])
-            spin.set_sensitive(False)
-            standard.set_sensitive(False)
-            standard.connect('toggled', lambda check, control=spin:
-                             control.set_sensitive(check.get_sensitive() and not check.get_active()))
-            row_limits.append(standard)
-            row_limits.append(spin)
-            row_limits.append(Gtk.Label(label='MiB'))
-            limit_page.append(row_limits)
-            limit_controls[key] = (standard, spin)
-        limit_page.append(Gtk.Label(label='1 MiB = 1,048,576バイト。指定範囲は1〜2047 MiBです。\n'
-            '標準値を使う場合はClamAVへ数値を指定しません。\n'
-            '両方を指定するときは合計上限を1ファイルの上限以上にしてください。\n'
-            '上限を超えた対象は検査不完了として報告します。', xalign=0, wrap=True))
-        info = Gtk.Label(label='保存先：' + str(self.store.path),
-                         xalign=0, wrap=True, selectable=True)
-        box.append(info)
-        message = Gtk.Label(xalign=0, wrap=True)
-        box.append(message)
-        row = Gtk.Box(spacing=8, homogeneous=True)
-        reset = Gtk.Button(label='ClamAV標準に戻す', sensitive=False)
-        standards = {}
-        def reset_values(_):
-            for key, check in controls.items():
-                if key in standards:
-                    check.set_active(standards[key])
-            for standard, _spin in limit_controls.values():
-                standard.set_active(True)
-            message.set_text('表示中の対応項目をClamAV標準値に戻しました。「検査設定を保存」で確定します。')
-        reset.connect('clicked', reset_values)
-        row.append(reset)
-        save = Gtk.Button(label='検査設定を保存', sensitive=False)
-        supported = set()
-        def save_preferences(_button):
-            try:
-                values = {key: control.get_active() for key, control in controls.items()}
-                option_arguments(values, supported)
-                limits = {key: None if standard.get_active() else spin.get_value_as_int()
-                          for key, (standard, spin) in limit_controls.items()}
-                limit_arguments(limits, supported)
-                automation = read_automation()
-                validate_automation(automation)
-                def apply():
-                    try:
-                        self.store.set_scan_preferences(values, limits, automation)
-                        self.refresh_profiles()
-                        message.set_text('保存しました。監視設定は画面または常駐監視へ反映します。')
-                    except Exception as error:
-                        message.set_text('保存できませんでした：' + str(error))
-                previous = self.store.automation_settings()
-                if automation['retention_enabled'] and any(automation[key] != previous[key] for key in automation if key != 'media_enabled'):
-                    confirmation = Gtk.MessageDialog(transient_for=window, modal=True,
-                        message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.OK_CANCEL,
-                        text='保存上限に従って過去の履歴を自動整理しますか？',
-                        secondary_text=f"通常結果は{automation['retention_days']}日、検出・不完了は{automation['alert_days']}日保存します。\n" +
-                        f"本文合計{automation['max_mib']}MiBまたは{automation['max_records']}件を超えると、古い通常結果から削除します。\n" +
-                        '上限を超える場合は検出・不完了も削除対象です。削除は元に戻せません。')
-                    def confirmed(dialog, answer):
-                        dialog.destroy()
-                        if answer == Gtk.ResponseType.OK:
-                            apply()
-                    confirmation.connect('response', confirmed)
-                    confirmation.present()
-                else:
-                    apply()
-            except Exception as error:
-                message.set_text('保存できませんでした：' + str(error))
-        save.connect('clicked', save_preferences)
-        row.append(save)
-        close = Gtk.Button(label='閉じる')
-        close.connect('clicked', lambda _: window.destroy())
-        row.append(close)
-        box.append(row)
-        def check_support():
-            try:
-                binary = shutil.which('clamscan')
-                if not binary:
-                    raise ValueError('ClamAVが見つかりません。')
-                available = supported_options(binary)
-                defaults = standard_defaults(binary)
-                status = engine_status()
-            except Exception as error:
-                GLib.idle_add(state.set_text, '対応項目を確認できませんでした：' + str(error))
-                return
-            def finish():
-                supported.update(available)
-                standards.update(defaults)
-                reset.set_sensitive(bool(standards))
-                state.set_text(status)
-                for option in OPTIONS:
-                    controls[option.key].set_sensitive(option.key in supported)
-                    if option.key not in supported:
-                        controls[option.key].set_label(option.label + '（このClamAVでは非対応）')
-                for key, (standard, spin) in limit_controls.items():
-                    standard.set_sensitive(key in supported)
-                    spin.set_sensitive(key in supported and not standard.get_active())
-                    if key not in supported:
-                        standard.set_label('このClamAVでは数値指定に非対応')
-                save.set_sensitive(True)
-                return False
-            GLib.idle_add(finish)
-        window.present()
-        threading.Thread(target=check_support, daemon=True).start()
 
     def selected_profile(self):
         row = self.plan_list.get_selected_row()
@@ -1169,300 +557,6 @@ class Application(Gtk.Application):
         if selected:
             self.confirm(selected[1], selected[0])
 
-    def edit_selected(self):
-        selected = self.operation_profile()
-        if selected:
-            self.edit_profile(*selected)
-
-    def duplicate_selected(self):
-        selected = self.operation_profile()
-        if not selected or self.busy:
-            return
-        try:
-            key = self.store.duplicate_profile(selected[0])
-            self.action_key = key
-            self.refresh_profiles()
-            self.show_notice('検査プランを複製しました。定期検査は無効です。名前や条件を編集できます。')
-        except Exception as error:
-            self.show_notice('複製できませんでした：' + str(error))
-
-    def delete_selected(self):
-        selected = self.operation_profile()
-        if not selected or self.busy:
-            return
-        key, plan = selected
-        schedule = read_schedule(self.store, key)
-        detail = plan.describe() + '\n\n' + schedule.describe()
-        detail += ('\n\nこの検査プランと予定を削除します。実際のファイルと検査履歴は残します。'
-                   '\n実行中の定期検査は完了まで継続します。既存cronは変更しません。')
-        dialog = Gtk.MessageDialog(transient_for=self.operation_parent(), modal=True,
-            message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.OK_CANCEL,
-            text='「' + plan.label + '」を削除しますか？', secondary_text=detail)
-        def response(window, answer):
-            window.destroy()
-            if answer != Gtk.ResponseType.OK or self.busy:
-                return
-            self.busy = True
-            self.profile_changed()
-            self.new_action.set_enabled(False)
-            self.set_controls(False)
-            self.show_notice('検査プランと予定を削除しています…')
-            def worker():
-                try:
-                    Scheduler(self.store).remove_profile(key)
-                    message = '検査プランと予定を削除しました。検査履歴と実際のファイルは残しています。'
-                except Exception as error:
-                    message = '削除できませんでした：' + str(error)
-                def finished():
-                    self.busy = False
-                    self.new_action.set_enabled(True)
-                    self.set_controls(True)
-                    self.refresh_profiles()
-                    self.show_notice(message)
-                    return False
-                GLib.idle_add(finished)
-            threading.Thread(target=worker, daemon=True).start()
-        dialog.connect('response', response)
-        dialog.present()
-
-    def edit_profile(self, key=None, plan=None):
-        if self.busy or self.schedule_busy:
-            return
-        is_new = key is None
-        plan = plan or Plan('', [str(Path.home())], [])
-        editor = Gtk.Window(application=self, title='検査プランの設定', transient_for=self.operation_parent(), modal=True)
-        editor.set_default_size(650, 550)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
-                      margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_child(box)
-        editor.set_child(scroll)
-        def entry(label, value, container=None):
-            widget = Gtk.Entry(text=value, hexpand=True)
-            caption = Gtk.Label(label=label, xalign=0)
-            caption.set_mnemonic_widget(widget)
-            box.append(caption)
-            (container or box).append(widget)
-            widget.update_property([Gtk.AccessibleProperty.LABEL], [label])
-            return widget
-        name = entry('プラン名（例：仕事の資料）', plan.label)
-        box.append(Gtk.Label(label='検査プランの種類', xalign=0))
-        kind = Gtk.DropDown.new_from_strings(['ディレクトリの定期検査', 'フォルダー監視'])
-        kind.update_property([Gtk.AccessibleProperty.LABEL], ['検査プランの種類'])
-        kind.set_selected(1 if plan.kind == 'watch' else 0)
-        box.append(kind)
-        root_row = Gtk.Box(spacing=8)
-        root = entry('基本の対象フォルダー', str(plan.targets[0]), root_row)
-        box.append(root_row)
-        def pick(action, callback):
-            chooser = Gtk.FileChooserNative(title='対象を選択', transient_for=editor,
-                action=action, accept_label='選択', cancel_label='キャンセル')
-            def response(dialog, answer):
-                file = dialog.get_file()
-                dialog.destroy()
-                if answer == Gtk.ResponseType.ACCEPT and file and file.get_path():
-                    callback(file.get_path())
-            chooser.connect('response', response)
-            chooser.show()
-        browse = Gtk.Button(icon_name='folder-open-symbolic', tooltip_text='基本のフォルダーを選択')
-        browse.update_property([Gtk.AccessibleProperty.LABEL], ['基本のフォルダーを選択'])
-        browse.connect('clicked', lambda _: pick(Gtk.FileChooserAction.SELECT_FOLDER, root.set_text))
-        root_row.append(browse)
-        box.append(Gtk.Label(label='除外する対象（フォルダーは配下すべて、ファイルはその1件）',
-                             xalign=0, wrap=True))
-        exclusions = [(str(p), False) for p in plan.excludes] + [(str(p), True) for p in plan.excluded_dirs]
-        listing = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        box.append(listing)
-        def refresh():
-            while listing.get_first_child():
-                listing.remove(listing.get_first_child())
-            for item in exclusions:
-                row = Gtk.Box(spacing=8)
-                text = Gtk.Label(label=('フォルダー: ' if item[1] else 'ファイル: ') + item[0],
-                                 xalign=0, wrap=True, hexpand=True, selectable=True)
-                row.append(text)
-                remove = Gtk.Button(label='除外を取り消す')
-                def remove_item(_button, value=item):
-                    exclusions.remove(value)
-                    refresh()
-                remove.connect('clicked', remove_item)
-                row.append(remove)
-                listing.append(row)
-        def add(path, directory):
-            item = (path, directory)
-            if item not in exclusions:
-                exclusions.append(item)
-                refresh()
-        refresh()
-        exclusion_actions = Gtk.Box(spacing=8, homogeneous=True)
-        box.append(exclusion_actions)
-        for label, directory, action in [('除外フォルダーを追加', True, Gtk.FileChooserAction.SELECT_FOLDER),
-                                         ('除外ファイルを追加', False, Gtk.FileChooserAction.OPEN)]:
-            button = Gtk.Button(label=label)
-            button.connect('clicked', lambda _, d=directory, a=action: pick(a, lambda p: add(p, d)))
-            exclusion_actions.append(button)
-        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL, margin_top=8, margin_bottom=8))
-        heading = Gtk.Label(label='スケジュール', xalign=0)
-        heading.add_css_class('heading')
-        box.append(heading)
-        saved_schedule = read_schedule(self.store, key) if key else Schedule()
-        scheduled_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        box.append(scheduled_box)
-        read_fields = self.schedule_fields(scheduled_box, saved_schedule, plan)
-        watch_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        watch_enabled = Gtk.CheckButton(label='フォルダー監視を有効にする', active=saved_schedule.enabled)
-        recursive = Gtk.CheckButton(label='サブフォルダーも監視する', active=plan.watch_recursive)
-        watch_box.append(watch_enabled)
-        watch_box.append(recursive)
-        watch_box.append(Gtk.Label(label='追加・変更されたファイルを、書き込みが落ち着いてから検査します。\n'
-            '一時ファイルは待機し、検査待ちをまとめます。アプリ自身のデータ・ロック用フォルダーは監視しません。\n'
-            '常駐監視を有効にすると画面を閉じても動作します。初回は別途フォルダー全体を検査してください。', xalign=0, wrap=True))
-        box.append(watch_box)
-        def kind_changed(*_):
-            scheduled_box.set_visible(kind.get_selected() == 0)
-            watch_box.set_visible(kind.get_selected() == 1)
-            heading.set_text('フォルダー監視' if kind.get_selected() == 1 else 'スケジュール')
-        kind.connect('notify::selected', kind_changed)
-        kind_changed()
-        state = {'running': False}
-        editor.connect('close-request', lambda _: state['running'])
-        error_label = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        box.append(error_label)
-        save = Gtk.Button(label='検査プランを保存')
-        save.add_css_class('suggested-action')
-        def save_profile(_button):
-            nonlocal key
-            if state['running'] or self.busy:
-                return
-            try:
-                from .core import validate_profile
-                new = Plan(name.get_text().strip(), [root.get_text()],
-                           [p for p, directory in exclusions if not directory], plan.phishing,
-                           [p for p, directory in exclusions if directory], plan.requires_admin,
-                           'watch' if kind.get_selected() == 1 else 'scheduled', recursive.get_active())
-                validate_profile(new)
-                schedule = (replace(saved_schedule, enabled=watch_enabled.get_active())
-                            if new.kind == 'watch' else read_fields())
-                schedule.calendar()
-                if schedule.enabled and new.requires_admin:
-                    raise ValueError('管理者権限が必要な対象は定期実行できません。')
-            except (ValueError, OSError) as error:
-                error_label.set_text(str(error))
-                return
-            def refresh_saved():
-                self.action_key = key
-                self.refresh_profiles(key if is_new else None)
-            changed = schedule != saved_schedule or new.kind != plan.kind
-            if not changed:
-                try:
-                    key = self.store.save_profile(new, key)
-                    refresh_saved()
-                    editor.destroy()
-                except (ValueError, OSError) as error:
-                    error_label.set_text(str(error))
-                return
-            detail = new.describe() + '\n\n' + (('フォルダー監視：有効（画面を閉じて使うには常駐監視を有効化）' if schedule.enabled else 'フォルダー監視：無効')
-                                                     if new.kind == 'watch' else schedule.describe())
-            detail += ('\n\n検査プランと予定を保存します。有効化時は検査がすぐ始まる場合があります。'
-                       '\n無効化しても実行中の検査は完了まで続けます。')
-            dialog = Gtk.MessageDialog(transient_for=editor, modal=True,
-                message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
-                text='検査プランとこの予定を保存しますか？', secondary_text=detail)
-            def response(d, answer):
-                d.destroy()
-                if answer != Gtk.ResponseType.OK or self.busy:
-                    return
-                state['running'] = True
-                self.busy = True
-                box.set_sensitive(False)
-                self.set_controls(False)
-                error_label.set_text('検査プランと予定を保存しています…')
-                def worker():
-                    nonlocal key
-                    profile_saved = False
-                    error = None
-                    try:
-                        key = self.store.save_profile(new, key)
-                        profile_saved = True
-                        Scheduler(self.store).apply(key, schedule)
-                    except Exception as failure:
-                        prefix = ('検査プランは保存しましたが、予定を登録できませんでした：'
-                                  if profile_saved else '検査プランを保存できませんでした：')
-                        error = prefix + str(failure)
-                    def finished():
-                        state['running'] = False
-                        self.busy = False
-                        self.set_controls(True)
-                        box.set_sensitive(True)
-                        if profile_saved:
-                            refresh_saved()
-                        if error:
-                            error_label.set_text(error + '\n内容を確認して再度保存してください。')
-                        else:
-                            editor.destroy()
-                        return False
-                    GLib.idle_add(finished)
-                threading.Thread(target=worker, daemon=True).start()
-            dialog.connect('response', response)
-            dialog.present()
-        save.connect('clicked', save_profile)
-        save_actions = Gtk.Box(spacing=8, homogeneous=True)
-        cancel = Gtk.Button(label='キャンセル')
-        cancel.connect('clicked', lambda _: editor.destroy())
-        save_actions.append(cancel)
-        save_actions.append(save)
-        box.append(save_actions)
-        editor.present()
-
-    def schedule_fields(self, box, saved, plan):
-        enabled = Gtk.CheckButton(label='定期検査を有効にする', active=saved.enabled)
-        enabled.set_sensitive(not plan.requires_admin)
-        box.append(enabled)
-        if plan.requires_admin:
-            box.append(Gtk.Label(label='管理者権限が必要な対象は、現在は定期実行できません。', wrap=True))
-        def field(label, widget):
-            widget.update_property([Gtk.AccessibleProperty.LABEL], [label])
-            row = Gtk.Box(spacing=12)
-            row.append(Gtk.Label(label=label, xalign=0, hexpand=True))
-            row.append(widget)
-            box.append(row)
-            return widget
-        frequency = field('頻度', Gtk.DropDown.new_from_strings(['毎日', '毎週', '毎月', '毎時', '一定間隔（n分）']))
-        frequency.set_selected(['daily', 'weekly', 'monthly', 'hourly', 'interval'].index(saved.frequency))
-        hour = field('時（0〜23）', Gtk.SpinButton.new_with_range(0, 23, 1))
-        hour.set_value(saved.hour)
-        minute = field('分（0〜59）', Gtk.SpinButton.new_with_range(0, 59, 1))
-        minute.set_value(saved.minute)
-        weekday = field('曜日', Gtk.DropDown.new_from_strings(['月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日', '日曜日']))
-        weekday.set_selected(saved.weekday)
-        monthday = field('日付（毎月1〜28日）', Gtk.SpinButton.new_with_range(1, 28, 1))
-        monthday.set_value(saved.monthday)
-        interval = field('間隔（1〜1440分）', Gtk.SpinButton.new_with_range(1, 1440, 1))
-        interval.set_value(saved.interval_minutes)
-        hint = Gtk.Label(xalign=0, wrap=True)
-        box.append(hint)
-        def frequency_changed(*_):
-            index = frequency.get_selected()
-            hour.get_parent().set_visible(index in (0, 1, 2))
-            minute.get_parent().set_visible(index != 4)
-            weekday.get_parent().set_visible(index == 1)
-            monthday.get_parent().set_visible(index == 2)
-            interval.get_parent().set_visible(index == 4)
-            if index == 4:
-                text = ('初回は登録から指定分後、その後は検査の完了から指定分後に繰り返します。\n'
-                        '画面を閉じても動きます。ログアウト中の分をまとめて実行しません。\n'
-                        '短い間隔の試験には、小さなテスト用フォルダーを使ってください。')
-            else:
-                text = ('端末の現地時刻で実行します。画面を閉じても動きます。\n'
-                        'ログイン後に逃した予定を1回実行します。電源オフ中は動きません。')
-            hint.set_text(text + '\n既存cronと同じ対象の予定を重複させないでください。')
-        frequency.connect('notify::selected', frequency_changed)
-        frequency_changed()
-        def read():
-            return Schedule(enabled.get_active(), ['daily', 'weekly', 'monthly', 'hourly', 'interval'][frequency.get_selected()],
-                            hour.get_value_as_int(), minute.get_value_as_int(),
-                            weekday.get_selected(), monthday.get_value_as_int(), interval.get_value_as_int())
-        return read
 
     def confirm(self, plan, key=None):
         if self.busy:
@@ -1491,7 +585,7 @@ class Application(Gtk.Application):
 
     def run_scan(self, target, key):
         try:
-            status, output = scan(target, self.store, self.cancel, profile_id=key)
+            status, output = execute_scan(target, self.store, self.cancel, scanner=scan, profile_id=key)
         except Exception as error:
             status, output = record_scan_failure(self.store, target, error, key)
         GLib.idle_add(self.finished, status, output)
@@ -1513,39 +607,6 @@ class Application(Gtk.Application):
         self.send_notification('scan-result', notification)
         return False
 
-    def history(self, _button):
-        selected = self.selected_profile()
-        old = self.history_list.get_selected_row()
-        old_id = self.log_entries[old.get_index()].id if old and old.get_index() < len(self.log_entries) else None
-        self.log_entries = self.store.history_entries(*selected) if selected else []
-        self.loading_history = True
-        while self.history_list.get_first_child():
-            self.history_list.remove(self.history_list.get_first_child())
-        for entry in self.log_entries:
-            label = Gtk.Label(label=entry.date_label(), xalign=0,
-                              margin_start=10, margin_end=10, margin_top=12, margin_bottom=12)
-            if entry.is_detected():
-                attributes = Pango.AttrList()
-                attributes.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
-                label.set_attributes(attributes)
-                label.update_property([Gtk.AccessibleProperty.LABEL], [entry.date_label() + ' 検出あり'])
-            self.history_list.append(label)
-        index = next((i for i, entry in enumerate(self.log_entries) if entry.id == old_id), 0)
-        self.loading_history = False
-        if self.log_entries:
-            self.history_list.select_row(self.history_list.get_row_at_index(index))
-        self.log_selected()
-
-    def log_selected(self, *_args):
-        if getattr(self, 'loading_history', False):
-            return
-        row = self.history_list.get_selected_row()
-        if row is None or row.get_index() >= len(self.log_entries):
-            self.result.get_buffer().set_text('検査記録はありません。')
-            return
-        entry = self.log_entries[row.get_index()]
-        self.result.get_buffer().set_text(entry.date_label() + '\n' + entry.status + '\n\n' +
-                                          entry.target + '\n\n' + entry.output)
 
     def show_shortcuts(self):
         window = getattr(self, 'shortcuts_window', None)
@@ -1606,7 +667,7 @@ class Application(Gtk.Application):
             self.automation.close()
         if getattr(self, 'monitor_lease', None):
             self.monitor_lease.close()
-        for key in list(getattr(self, 'automatic_notices', {})):
+        for key in list(self.automatic_notices.pending) if hasattr(self, 'automatic_notices') else []:
             self.flush_automatic_notice(key)
         if getattr(self, 'install_prompt_timer', None):
             GLib.source_remove(self.install_prompt_timer)

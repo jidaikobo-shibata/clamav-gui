@@ -49,22 +49,23 @@ Windows担当者のCodexへ、この文書を読んで実装を進めるよう�
 
 ## 4. 移植の入口とOS依存箇所
 
-**現状では `core.py` と `background.py` のトップレベルに `fcntl` のimportがあります。**
-Windowsで画面を開く前に失敗し得ます。UIの小修正だけで移植できるとは扱わないでください。
+**OS連携の入口は `clam_gui/platforms.get_backend()` です。**
+Linuxの `fcntl` は遅延読込に変更し、画面は `clam_gui/ui/` へ分割しました。
+[コードの責務とOS移植の入口](ARCHITECTURE.md)を先に読んでください。Windowsバックエンドは未実装です。
 
 | ファイル | Windows対応で確認する点 |
 |---|---|
-| `clam_gui/__main__.py` | GUIからUbuntu実装への接続。起動案内、設定、状態表示、操作の確認を維持してOS別実装へ接続 |
-| `clam_gui/core.py` | SQLite・プラン・検査。`fcntl`、ホーム配下の共通ロック、固定引数、除外の正規表現と `/` 区切り、UTF-8前提の出力解析 |
+| `clam_gui/__main__.py` | GUIから共通バックエンドへの接続。画面別処理は `ui/`。起動案内、設定、状態表示、操作の確認を維持してOS別実装へ接続 |
+| `clam_gui/core.py` | SQLite・プラン・検査。バックエンド経由の排他、ホーム配下の共通ロックの保存先、固定引数、除外の正規表現と `/` 区切り、UTF-8前提の出力解析 |
 | `clam_gui/options.py` | 実際の `clamscan.exe --help` に基づく対応と初期値の確認。固定引数も別途確認 |
-| `clam_gui/runtime.py` | Linuxの `/proc`・boot ID・開始時刻によるプロセス識別。PIDの存在だけの確認に置き換えない |
+| `clam_gui/runtime.py` | バックエンドへ委譲したプロセス識別。Linux実装は `platforms/linux.py` の `/proc`・boot ID・開始時刻。PIDの存在だけの確認に置き換えない |
 | `clam_gui/packages.py` | APT・dpkg・pkexec・cgroup。Windowsで読み込み/実行すべき箇所を分離 |
 | `clam_gui/definitions.py`, `notifications.py` | `/var/lib/clamav` 等の固定パス、FreshClamのsystemd/journal、通知文の共通部分 |
 | `clam_gui/schedule.py`, `scripts/run_scheduled.py` | systemd・固定Python・notify-sendをWindows方式へ置き換える |
 | `clam_gui/automation.py` | 待機・重複抑制・メディアの生存確認。Windowsの大小文字・再解析ポイント・ボリューム識別との整合を確認 |
 | `clam_gui/gio_watch.py` | GIOのフォルダー/メディア検知。Windowsの実機で使える範囲を調べ、不足をアダプターで補う |
-| `clam_gui/background.py` | systemd管理と `fcntl` の監視所有権。SQLiteの状態・要求共有は共用を検討 |
-| `clam_gui/monitor.py`, `scripts/run_monitor.py` | GTKなしの監視プロセス。GLibのUnixシグナル処理・notify-send・停止/復帰検知を移植 |
+| `clam_gui/background.py` | バックエンドから呼ぶsystemd管理と、共通ロックを使う監視所有権。SQLiteの状態・要求共有は共用を検討 |
+| `clam_gui/monitor.py`, `scripts/run_monitor.py` | GTKなしの監視プロセス。バックエンドの停止ハンドラー・通知と、停止/復帰検知を移植 |
 | `clam_gui/retention.py` | 履歴整理。データ互換と確認の意味を維持し、Windows移植を理由に既存履歴を削除しない |
 | `scripts/launch_gui.py`, `install_launcher.py` | LinuxのDesktop Entry。Windowsの起動経路と依存解決は別途必要 |
 | `scripts/smoke_gui.py`, `smoke_monitor.py` | Ubuntuの分離検証。Windows用の隔離した検証を追加し、Linux専用手順をWindowsへ強制しない |
@@ -145,7 +146,7 @@ macOS担当者と共通部分を分担し、既存のUbuntu実装を壊す大変
 python -m unittest discover -s tests -v
 ```
 
-- 引き継ぎ元のUbuntu公開用コードは124件のテスト、分離WaylandのGUI検証、ヘッドレス監視の検証を通過しています。Windowsでの成功を意味しません。
+- 引き継ぎ元のUbuntu公開用コードは137件のテスト、分離WaylandのGUI検証、ヘッドレス監視の検証を通過しています。Windowsでの成功を意味しません。
 - OS固有の実機テストと共通/模擬テストを分けます。Windows移植を理由に共通テスト全体をスキップしません。Ubuntuの回帰確認はUbuntu担当者へ依頼します。
 - 実検査は一時フォルダーの無害なデータから開始します。実メール・業務資料・鍵は使いません。検出/警告/未完了はまず模擬出力で検証します。
 - 日本語・空白・記号のあるパス、除外、サイズ超過、未導入、権限不足、競合、中止、子プロセス残留、PID再利用、古い定義を確認します。

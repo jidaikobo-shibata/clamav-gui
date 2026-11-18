@@ -1,4 +1,6 @@
 """Bounded queues and cooperative jobs for foreground-only automatic scans."""
+from .jobs import execute_scan
+from .results import assess
 from dataclasses import dataclass
 import datetime
 import os
@@ -235,7 +237,7 @@ class Automation:
                     kwargs['available'] = medium.available
                 else:
                     kwargs['files'] = [item.path for item in batch]
-                status, output = scanner(plan, self.store, self.cancel, **kwargs)
+                status, output = execute_scan(plan, self.store, self.cancel, scanner=scanner, **kwargs)
             except ScanBusyError:
                 retry, status, output = True, '', ''
             except Exception as error:
@@ -249,7 +251,7 @@ class Automation:
                         for item in batch:
                             self.queue.put(key, self.plans[key], item.path)
                 elif not retry:
-                    if status.startswith(('検査完了', '検出あり')):
+                    if assess(status, output).completed:
                         for item in batch:
                             if signature(item.path) == item.signature:
                                 self.queue.completed[key, item.path] = item.signature
@@ -259,7 +261,13 @@ class Automation:
                     self.finished(key, status, output, plan.label)
                 return False
             self.dispatch(done)
-        threading.Thread(target=worker, daemon=True).start()
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception as error:
+            self.active, self.active_key, self.active_media = False, None, None
+            from .core import record_scan_failure
+            status, output = record_scan_failure(self.store, plan, error, key)
+            self.finished(key, status, output, plan.label)
 
     def close(self):
         self.closed = True
