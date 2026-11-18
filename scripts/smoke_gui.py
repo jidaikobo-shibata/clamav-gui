@@ -372,6 +372,8 @@ def check():
         store.save(datetime.datetime.now().astimezone().isoformat(), plan.describe(), '検査完了', output, kwargs['profile_id'])
         return '検査完了', output
     app.automation.scanner = fake_auto_scan
+    app.automation.START_INTERVAL = .1
+    app.automation.REST_INTERVAL = .05
     app.automation.queue.quiet = .05
     app.refresh_profiles(watch_key)
     def wait_until(predicate):

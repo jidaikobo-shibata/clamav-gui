@@ -89,21 +89,29 @@ class WatchQueue:
     def take(self, plans, maximum=50):
         batch = []
         chosen = None
+        now = self.clock()
+        # Do not stat files still in their quiet period. At most 64 due entries
+        # receive filesystem validation in one tick, including deleted/unsafe files.
+        checked = 0
         for ident, item in list(self.pending.items()):
             key, path = ident
             plan = plans.get(key)
-            stamp = signature(path)
-            if not plan or not allowed_file(plan, path) or not stamp or self.completed.get(ident) == stamp:
+            if not plan:
                 self.pending.pop(ident, None)
                 continue
-            if stamp != item.signature:
-                item.signature, item.due = stamp, self.clock() + self.quiet
-            if item.due > self.clock() or (chosen is not None and chosen != key):
+            if item.due > now or (chosen is not None and chosen != key):
                 continue
-            chosen = key
-            batch.append(item)
-            self.pending.pop(ident)
-            if len(batch) == maximum:
+            checked += 1
+            stamp = signature(path)
+            if not stamp or not allowed_file(plan, path) or self.completed.get(ident) == stamp:
+                self.pending.pop(ident, None)
+            elif stamp != item.signature:
+                item.signature, item.due = stamp, now + self.quiet
+            else:
+                chosen = key
+                batch.append(item)
+                self.pending.pop(ident)
+            if len(batch) == maximum or checked >= 64:
                 break
         return chosen, batch
 
@@ -129,6 +137,11 @@ class Media:
 
 
 class Automation:
+    # Repeated clamscan database loading is expensive. Batch queued arrivals and
+    # leave time for foreground work even after a long-running scan finishes.
+    START_INTERVAL = 15
+    REST_INTERVAL = 2
+
     def __init__(self, store, dispatch, finished, changed=lambda: None, clock=time.monotonic, scanner=None):
         self.store, self.dispatch, self.finished, self.changed = store, dispatch, finished, changed
         self.clock = clock
@@ -140,6 +153,7 @@ class Automation:
         self.media_pending = []
         self.media_seen = set()
         self.active = False
+        self.next_start = float('-inf')
         self.active_key = None
         self.active_media = None
         self.cancel = threading.Event()
@@ -204,10 +218,13 @@ class Automation:
         if key in self.errors:
             return self.errors[key]
         count = len(self.media_pending) if key == MEDIA_ID else sum(ident[0] == key for ident in self.queue.pending)
-        return f'検査待ち：{count}件' if count else '監視中（アプリ起動中のみ）'
+        if count:
+            waiting = '（負荷を抑えて待機中）' if self.clock() < self.next_start else ''
+            return f'検査待ち：{count}件' + waiting
+        return '監視中（アプリ起動中のみ）'
 
     def tick(self, blocked=False):
-        if self.closed or self.active or blocked:
+        if self.closed or self.active or blocked or self.clock() < self.next_start:
             return
         import shutil
         if not shutil.which('clamscan'):
@@ -228,6 +245,7 @@ class Automation:
             if not batch:
                 return
             plan = self.plans[key]
+        self.next_start = self.clock() + self.START_INTERVAL
         self.active, self.active_key = True, key
         self.active_media = medium.token if medium else None
         self.cancel = threading.Event()
@@ -247,6 +265,7 @@ class Automation:
             except Exception as error:
                 status, output = record_scan_failure(self.store, plan, error, key)
             def done():
+                self.next_start = max(self.next_start, self.clock() + self.REST_INTERVAL)
                 self.active, self.active_key, self.active_media = False, None, None
                 if retry and not self.closed:
                     if medium and self.media_enabled and medium.available():
@@ -268,6 +287,7 @@ class Automation:
         try:
             threading.Thread(target=worker, daemon=True).start()
         except Exception as error:
+            self.next_start = max(self.next_start, self.clock() + self.REST_INTERVAL)
             self.active, self.active_key, self.active_media = False, None, None
             from .core import record_scan_failure
             status, output = record_scan_failure(self.store, plan, error, key)

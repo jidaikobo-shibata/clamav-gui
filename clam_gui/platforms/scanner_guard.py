@@ -7,7 +7,33 @@ import argparse
 import ctypes
 import os
 import signal
+import shutil
+import subprocess
 import sys
+
+
+def lower_priority():
+    """Best effort only: missing I/O scheduling support must not disable scans.
+
+    This runs exclusively in the guarded child, never the GUI/monitor parent.
+    """
+    try:
+        current = os.getpriority(os.PRIO_PROCESS, 0)
+        if current < 10:
+            os.setpriority(os.PRIO_PROCESS, 0, 10)
+    except OSError as error:
+        print('NOTE: 検査のCPU優先度を下げられませんでした：' + str(error), flush=True)
+    ionice = shutil.which('ionice')
+    if not ionice:
+        print('NOTE: ioniceが見つからないため、I/O優先度はOSの標準設定を使用します。', flush=True)
+        return
+    try:
+        result = subprocess.run([ionice, '-c', '3', '-p', str(os.getpid())],
+                                capture_output=True, text=True, timeout=2)
+        if result.returncode:
+            print('NOTE: 検査のI/O優先度を下げられませんでした。OSの標準設定を使用します。', flush=True)
+    except (OSError, subprocess.TimeoutExpired):
+        print('NOTE: 検査のI/O優先度を下げられませんでした。OSの標準設定を使用します。', flush=True)
 
 
 def main():
@@ -30,6 +56,7 @@ def main():
         # If the creator died before prctl(), do not start an orphan scanner.
         if os.getppid() != args.parent:
             return 125
+        lower_priority()
         os.set_inheritable(args.lock_fd, True)
         os.execvpe(command[0], command, os.environ)
     except (OSError, AttributeError) as error:

@@ -35,6 +35,7 @@ class Observers:
         self.monitors = {}
         self.tasks = deque()
         self.queued = set()
+        self.overflow = set()
         self.idle = None
         self.current = None
         self.mounts = {}
@@ -55,6 +56,7 @@ class Observers:
         self.finish_directory()
         self.tasks.clear()
         self.queued.clear()
+        self.overflow.clear()
         self.plans = plans
         for key, plan in plans.items():
             self.engine.errors.pop(key, None)
@@ -63,10 +65,17 @@ class Observers:
     def enqueue(self, key, path, scan_files):
         ident = key, str(path)
         if ident not in self.queued:
+            if len(self.queued) >= self.limit:
+                plan = self.plans.get(key)
+                if plan and key not in self.overflow:
+                    self.overflow.add(key)
+                    self.engine.warn(key, plan, f'監視準備の待ちフォルダー数が上限{self.limit}に達しました。一部を監視できません。監視範囲を狭め、フォルダー全体の検査を併用してください。')
+                return False
             self.queued.add(ident)
             self.tasks.append((key, str(path), scan_files))
         if self.idle is None:
             self.idle = GLib.idle_add(self.drain)
+        return True
 
     @property
     def discovering(self):
@@ -97,7 +106,7 @@ class Observers:
                     else:
                         self.current = key, directory, scan_files, entries, count + 1
                         if not entry.is_symlink():
-                            if entry.is_dir(follow_symlinks=False) and plan.watch_recursive:
+                            if entry.is_dir(follow_symlinks=False) and plan.watch_recursive and allowed_path(plan, entry.path):
                                 self.enqueue(key, entry.path, scan_files)
                             elif entry.is_file(follow_symlinks=False) and allowed_path(plan, entry.path):
                                 if self.inventory:
@@ -221,3 +230,5 @@ class Observers:
             self.volumes.disconnect(signal)
         self.monitors.clear()
         self.tasks.clear()
+        self.queued.clear()
+        self.overflow.clear()
