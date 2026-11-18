@@ -27,6 +27,7 @@ def removable_mount(mount):
 
 class Observers:
     def __init__(self, engine, volumes=None, limit=1024):
+        self.inventory = None
         self.engine = engine
         self.limit = limit
         self.plans = {}
@@ -101,8 +102,11 @@ class Observers:
                             continue
                         if entry.is_dir(follow_symlinks=False) and plan.watch_recursive:
                             self.enqueue(key, entry.path, scan_files)
-                        elif scan_files and entry.is_file(follow_symlinks=False):
-                            self.engine.file_event(key, entry.path)
+                        elif entry.is_file(follow_symlinks=False) and allowed_path(plan, entry.path):
+                            if self.inventory:
+                                self.inventory(key, entry.path)
+                            if scan_files:
+                                self.engine.file_event(key, entry.path)
             except OSError as error:
                 self.engine.warn(key, plan, '監視フォルダーを読み取れません：' + str(error))
         return True
@@ -157,7 +161,13 @@ class Observers:
 
     def scan_connected(self):
         count = 0
-        for mount in self.volumes.get_mounts():
+        mounts = self.volumes.get_mounts()
+        uris = {mount.get_root().get_uri() for mount in mounts}
+        for uri, medium in list(self.mounts.items()):
+            if uri not in uris or not medium.available():
+                self.mounts.pop(uri)
+                self.engine.remove_media(medium.token)
+        for mount in mounts:
             self.remember_mount(mount, scan=False)
         for medium in self.mounts.values():
             if medium.available():

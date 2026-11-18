@@ -14,6 +14,7 @@ from .schedule import Schedule, Scheduler, read_schedule
 from .automation import Automation, MEDIA_ID, media_plan
 from .gio_watch import Observers
 from .retention import validate as validate_automation
+from .background import BackgroundService, Lease, enabled as background_enabled, heartbeat, request_media, watched_plans
 from .runtime import activities, request_stop
 from .definitions import definition_update_label, AutoUpdateService, AutoUpdateState
 
@@ -71,7 +72,7 @@ class Application(Gtk.Application):
         targets.append('検査プランを追加…(_N)', 'app.new-target')
         self.menu_model.append_section(None, targets)
         environment = Gio.Menu()
-        environment.append('検査設定…(_P)', 'app.preferences')
+        environment.append('環境設定…(_P)', 'app.preferences')
         environment.append('ClamAVの管理…(_C)', 'app.package-setup')
         self.menu_model.append_section(None, environment)
         information = Gio.Menu()
@@ -136,6 +137,7 @@ class Application(Gtk.Application):
         self.log_entries = []
         self.automatic_notices = {}
         self.automatic_notice_timers = {}
+        self.monitor_lease = Lease(self.store)
         self.automation = Automation(self.store, GLib.idle_add, self.automatic_finished, lambda: self.history(None))
         self.observers = Observers(self.automation)
         self.refresh_profiles()
@@ -275,6 +277,20 @@ class Application(Gtk.Application):
         self.poll_plans()
 
     def poll_plans(self):
+        if background_enabled(self.store):
+            remote = heartbeat(self.store)
+            revision = (remote.get('generation'), remote.get('revision'))
+            if revision != getattr(self, 'monitor_revision', None):
+                self.monitor_revision = revision
+                self.history(None)
+            token = getattr(self, 'media_request_token', None)
+            if token:
+                from .background import preference
+                reply = preference(self.store, 'background-command-result', {})
+                if reply.get('token') == token:
+                    count = reply.get('count', 0)
+                    self.show_notice(f'接続済みの外部メディア{count}件を検査待ちに追加しました。' if count else '検査できる外部メディアが接続されていません。')
+                    self.media_request_token = None
         self.refresh_auto_status()
         self.definition_label.set_text(definition_update_label())
         self.definition_button.set_sensitive(not self.busy and not self.schedule_busy)
@@ -294,7 +310,7 @@ class Application(Gtk.Application):
                 description = replace(schedule, enabled=True).describe().removeprefix('定期検査：')
                 description = description.replace('（端末の現地時刻）', '').strip()
                 if widgets['plan'].kind != 'scheduled':
-                    description = '外部メディア接続時（アプリ起動中のみ）' if key == MEDIA_ID else '追加・変更時（アプリ起動中のみ）'
+                    description = ('外部メディア接続時' if key == MEDIA_ID else '追加・変更時') + ('（ログイン中）' if background_enabled(self.store) else '（画面を開いている間）')
                 if not schedule.enabled:
                     description += '・停止中'
                 widgets['schedule'].set_text(description)
@@ -309,7 +325,7 @@ class Application(Gtk.Application):
             unknown = failed or bool(running and not running.known)
             automatic = widgets['plan'].kind != 'scheduled' and schedule is not None and schedule.enabled
             widgets['status_box'].set_visible(bool(running) or unknown or automatic)
-            widgets['status'].set_text('実行状態を確認できません' if unknown else running.describe() if running else self.automation.status(key) if automatic else '')
+            widgets['status'].set_text('実行状態を確認できません' if unknown else running.describe() if running else self.monitor_status(key) if automatic else '')
             widgets['spinner'].set_spinning(bool(running and running.known and not running.stopping))
             widgets['spinner'].set_visible(bool(running and running.known))
             blocked = self.schedule_busy or (self.busy and self.scan_key is None)
@@ -339,6 +355,10 @@ class Application(Gtk.Application):
             if name == 'edit':
                 self.preferences()
             elif name == 'run':
+                if background_enabled(self.store):
+                    self.media_request_token = request_media(self.store)
+                    self.show_notice('常駐監視へ接続済みメディアの検査を依頼しました。履歴で結果を確認してください。')
+                    return
                 count = self.observers.scan_connected()
                 self.show_notice(f'接続済みの外部メディア{count}件を検査待ちに追加しました。' if count else '検査できる外部メディアが接続されていません。')
             return
@@ -389,7 +409,7 @@ class Application(Gtk.Application):
             dialog = Gtk.MessageDialog(transient_for=self.window, modal=True,
                 message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
                 text='フォルダー監視を有効にしますか？' if watching else '定期検査を有効にしますか？',
-                secondary_text=('アプリ起動中に追加・変更ファイルを検査します。既存ファイルは自動では全体検査しません。'
+                secondary_text=('追加・変更ファイルを検査します。常駐監視が有効なら画面を閉じても動作します。既存ファイルは自動では全体検査しません。'
                                 if watching else schedule.describe() + '\n復帰後の検査がすぐ始まる場合があります。') +
                                 '\nオフにしても実行中の検査は続行します。')
             def response(window, answer):
@@ -430,23 +450,102 @@ class Application(Gtk.Application):
     def configure_automation(self):
         if not hasattr(self, 'automation'):
             return
-        watches = []
-        for key, plan in self.store.profiles():
-            if plan.kind != 'watch' or not read_schedule(self.store, key).enabled:
-                continue
-            root = Path(plan.targets[0])
-            internal = [self.store.path.parent, Path.home()/'.clamdlog']
-            if any(root == path or path in root.parents for path in internal):
-                self.show_notice('アプリ自身の保存先・ロック用フォルダーは監視できません。')
-                continue
-            excluded = list(plan.excluded_dirs) + [str(path) for path in internal if root in path.parents]
-            watches.append((key, replace(plan, excluded_dirs=excluded)))
+        if background_enabled(self.store):
+            # Yield all observation to the service; a current scan is allowed to finish.
+            self.observers.configure([])
+            self.automation.configure([], False)
+            if not self.automation.active:
+                self.monitor_lease.close()
+            return
+        if not self.monitor_lease.acquire():
+            self.observers.configure([])
+            self.automation.configure([], False)
+            return
+        watches = watched_plans(self.store)
         self.automation.configure(watches, self.store.automation_settings()['media_enabled'])
         self.observers.configure(watches)
 
+    def monitor_status(self, key):
+        if background_enabled(self.store):
+            state = heartbeat(self.store)
+            if not state:
+                return '常駐監視に接続できません。環境設定で確認してください。'
+            return state.get('statuses', {}).get(key, '常駐監視へ設定を反映中…').replace('アプリ起動中のみ', 'ログイン中')
+        if not self.monitor_lease.file:
+            return '別のプロセスが監視しています'
+        return self.automation.status(key)
+
     def tick_automation(self):
-        self.automation.tick(blocked=self.busy or self.schedule_busy or bool(self.active_runs))
+        self.configure_automation()
+        if not background_enabled(self.store) and self.monitor_lease.file:
+            self.automation.tick(blocked=self.busy or self.schedule_busy or bool(self.active_runs))
         return True
+
+    def background_controls(self, content):
+        service = BackgroundService(self.store)
+        state = Gtk.Label(xalign=0, wrap=True)
+        content.append(state)
+        control = Gtk.Button(halign=Gtk.Align.START)
+        content.append(control)
+        content.append(Gtk.Label(label='有効にするとログイン時から、画面を閉じても監視します。ログアウト時は停止します。\n'
+            '初回は比較元を作成し、次回起動・スリープ復帰時は前回からの追加・変更も確認します。\n'
+            '停止中に作成・削除されたファイルや、接続・取り外しされたメディアは後から検査できません。',
+            xalign=0, wrap=True))
+        def refresh():
+            active = background_enabled(self.store)
+            connected = bool(heartbeat(self.store))
+            state.set_text('常駐監視：' + ('稼働中（ログイン中）' if connected and active else
+                '有効・接続できません。再起動するかシステムのユーザーサービスを確認してください。' if active else
+                '無効（画面を開いている間だけ監視します）'))
+            control.set_label('常駐監視を無効にする…' if active else '常駐監視を有効にする…')
+            control.set_sensitive(service.supported() and not self.schedule_busy)
+            return True
+        refresh()
+        restart = Gtk.Button(label='常駐監視を再起動…', halign=Gtk.Align.START)
+        content.append(restart)
+        def change(enable):
+            if self.schedule_busy or self.automation.active:
+                self.show_notice('処理中です。監視の検査が終わってから変更してください。')
+                return
+            dialog = Gtk.MessageDialog(transient_for=content.get_root(), modal=True,
+                message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
+                text='ログイン中の常駐監視を有効にしますか？' if enable else '常駐監視を停止して無効にしますか？',
+                secondary_text=('ユーザーサービスを登録・起動します。次回ログイン時も起動します。再起動の場合、実行中の自動検査は中止します。管理者権限は不要です。' if enable else
+                    'ユーザーサービスを停止し、自動起動を解除します。実行中の自動検査も中止します。画面が開いていれば画面側の監視に戻ります。')+
+                    '\n変更する設定：'+str(service.path)+'\nClamAV本体・定義更新・定期検査のサービスは変更しません。')
+            def response(window, result):
+                window.destroy()
+                if result != Gtk.ResponseType.OK:
+                    return
+                self.schedule_busy = True
+                refresh()
+                def worker():
+                    try:
+                        service.apply(enable)
+                        error = None
+                    except Exception as caught:
+                        error = str(caught)
+                    def done():
+                        self.schedule_busy = False
+                        self.configure_automation()
+                        refresh()
+                        state.set_text(('変更できませんでした：'+error) if error else
+                            ('常駐監視を有効にしました。起動状態は数秒後に反映されます。' if enable else '常駐監視を無効にしました。'))
+                        return False
+                    GLib.idle_add(done)
+                threading.Thread(target=worker, daemon=True).start()
+            dialog.connect('response', response)
+            dialog.present()
+        control.connect('clicked', lambda _: change(not background_enabled(self.store)))
+        restart.connect('clicked', lambda _: change(True))
+        def update():
+            if not content.get_root():
+                return False
+            refresh()
+            restart.set_sensitive(background_enabled(self.store) and service.supported() and not self.schedule_busy)
+            return True
+        restart.set_sensitive(background_enabled(self.store) and service.supported() and not self.schedule_busy)
+        GLib.timeout_add_seconds(3, update)
 
     def automatic_finished(self, key, status, output, label=None):
         self.history(None)
@@ -481,9 +580,10 @@ class Application(Gtk.Application):
         scroll = Gtk.ScrolledWindow(vexpand=True)
         scroll.set_child(content)
         pages.append_page(scroll, Gtk.Label(label='自動検査・履歴'))
+        self.background_controls(content)
         media = Gtk.CheckButton(label='外部メディア検査を実施する', active=values['media_enabled'])
         content.append(media)
-        content.append(Gtk.Label(label='アプリ起動中、接続後に読み取り可能になったUSBメモリーやデータCD/DVDを検査します。\n'
+        content.append(Gtk.Label(label='接続後に読み取り可能になったUSBメモリーやデータCD/DVDを検査します。\n'
             'オンにすると左ペインに専用プランを表示します。既に接続済みのものは専用プランの「今すぐ検査」から検査できます。\n'
             'オフでも実行中の検査は続行します。メディアの利用は禁止しません。', wrap=True, xalign=0))
         history = Gtk.Button(label='外部メディアの保存済み履歴を表示')
@@ -507,7 +607,7 @@ class Application(Gtk.Application):
         content.append(Gtk.Label(label='保存時に確認してから適用します。古い通常結果から整理し、容量・件数超過時は検出・不完了も削除対象です。\n'
             '本文の論理容量の上限です。SQLiteファイルは削除直後に縮まず、空き領域を再利用します。\n'
             'フォルダー監視は検査待ち1000件、1回50ファイル、監視フォルダー最大1024です。上限超過は不完了として記録します。\n'
-            '正常な自動検査の通知は20秒ごとにまとめます。アプリ停止中や監視準備中の取りこぼし対策として定期的な全体検査を併用してください。',
+            '正常な自動検査の通知は20秒ごとにまとめます。監視停止中や監視準備中の取りこぼし対策として定期的な全体検査を併用してください。',
             xalign=0, wrap=True))
         def read():
             return dict(media_enabled=media.get_active(), retention_enabled=retention.get_active(),
@@ -976,7 +1076,7 @@ class Application(Gtk.Application):
                     try:
                         self.store.set_scan_preferences(values, limits, automation)
                         self.refresh_profiles()
-                        message.set_text('保存しました。監視設定はアプリ起動中に反映します。')
+                        message.set_text('保存しました。監視設定は画面または常駐監視へ反映します。')
                     except Exception as error:
                         message.set_text('保存できませんでした：' + str(error))
                 previous = self.store.automation_settings()
@@ -1214,9 +1314,9 @@ class Application(Gtk.Application):
         recursive = Gtk.CheckButton(label='サブフォルダーも監視する', active=plan.watch_recursive)
         watch_box.append(watch_enabled)
         watch_box.append(recursive)
-        watch_box.append(Gtk.Label(label='アプリ起動中に追加・変更されたファイルを、書き込みが落ち着いてから検査します。\n'
+        watch_box.append(Gtk.Label(label='追加・変更されたファイルを、書き込みが落ち着いてから検査します。\n'
             '一時ファイルは待機し、検査待ちをまとめます。アプリ自身のデータ・ロック用フォルダーは監視しません。\n'
-            '起動前からあるファイルや終了中の変更は、別途フォルダー全体を検査してください。', xalign=0, wrap=True))
+            '常駐監視を有効にすると画面を閉じても動作します。初回は別途フォルダー全体を検査してください。', xalign=0, wrap=True))
         box.append(watch_box)
         def kind_changed(*_):
             scheduled_box.set_visible(kind.get_selected() == 0)
@@ -1261,7 +1361,7 @@ class Application(Gtk.Application):
                 except (ValueError, OSError) as error:
                     error_label.set_text(str(error))
                 return
-            detail = new.describe() + '\n\n' + (('フォルダー監視：有効（アプリ起動中のみ）' if schedule.enabled else 'フォルダー監視：無効')
+            detail = new.describe() + '\n\n' + (('フォルダー監視：有効（画面を閉じて使うには常駐監視を有効化）' if schedule.enabled else 'フォルダー監視：無効')
                                                      if new.kind == 'watch' else schedule.describe())
             detail += ('\n\n検査プランと予定を保存します。有効化時は検査がすぐ始まる場合があります。'
                        '\n無効化しても実行中の検査は完了まで続けます。')
@@ -1504,6 +1604,8 @@ class Application(Gtk.Application):
         if getattr(self, 'observers', None):
             self.observers.close()
             self.automation.close()
+        if getattr(self, 'monitor_lease', None):
+            self.monitor_lease.close()
         for key in list(getattr(self, 'automatic_notices', {})):
             self.flush_automatic_notice(key)
         if getattr(self, 'install_prompt_timer', None):

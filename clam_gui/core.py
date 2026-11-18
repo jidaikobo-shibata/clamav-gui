@@ -286,7 +286,7 @@ class Plan:
     def describe(self, include_policy=True):
         lines = [self.label, '対象:'] + [str(p) for p in self.targets]
         if self.kind == 'watch':
-            lines += ['検査方法：フォルダー監視（アプリ起動中）']
+            lines += ['検査方法：フォルダー監視']
         if self.excludes:
             lines += ['除外（ファイルの完全一致）:'] + [str(p) for p in self.excludes]
         if self.excluded_dirs:
