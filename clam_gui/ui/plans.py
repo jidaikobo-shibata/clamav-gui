@@ -304,4 +304,3 @@ class PlanEditor:
                             hour.get_value_as_int(), minute.get_value_as_int(),
                             weekday.get_selected(), monthday.get_value_as_int(), interval.get_value_as_int())
         return read
-

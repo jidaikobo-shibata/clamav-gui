@@ -352,4 +352,3 @@ class PackageWindow:
         refresh.connect('clicked', lambda _: check_state())
         window.present()
         check_state()
-

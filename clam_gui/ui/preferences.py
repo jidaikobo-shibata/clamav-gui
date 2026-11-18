@@ -268,4 +268,3 @@ class PreferencesWindow:
             GLib.idle_add(finish)
         window.present()
         threading.Thread(target=check_support, daemon=True).start()
-

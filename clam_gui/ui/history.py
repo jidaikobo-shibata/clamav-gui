@@ -60,4 +60,3 @@ class HistoryView:
         entry = self.log_entries[row.get_index()]
         self.result.get_buffer().set_text(entry.date_label() + '\n' + entry.status + '\n\n' +
                                           entry.target + '\n\n' + entry.output)
-

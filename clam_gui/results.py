@@ -118,4 +118,3 @@ def summarize(code, output, cancelled=False):
     kind = (ResultKind.CANCELLED if cancelled else ResultKind.INCOMPLETE if incomplete or limits or encrypted
             else ResultKind.DETECTED if detected else ResultKind.WARNING if warnings or code == 1 else ResultKind.CLEAN)
     return ScanStatus('\n'.join([title] + details), kind, detected)
-
