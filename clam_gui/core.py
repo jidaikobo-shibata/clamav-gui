@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import subprocess
 from .retention import DEFAULTS as AUTOMATION_DEFAULTS, validate as validate_automation, prune
+from .execution import ScanBusyError, ScanAlreadyQueued, lane_for, lock_path as default_lock_path
 from .runtime import track_scan
 from .platforms import get_backend
 from .settings import Preferences
@@ -57,6 +58,8 @@ class Store:
             db.execute('CREATE TABLE IF NOT EXISTS scan_runs '
                        '(token TEXT PRIMARY KEY, profile_id TEXT NOT NULL, pid INTEGER NOT NULL, '
                        'identity TEXT, started TEXT NOT NULL, cancel_requested INTEGER NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS scan_run_details '
+                       '(token TEXT PRIMARY KEY, phase TEXT NOT NULL, lane TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS preferences '
                        '(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
         self.path.chmod(0o600)
@@ -315,11 +318,7 @@ def record_scan_failure(store, plan, error, profile_id=None, started=None):
     return status, output
 
 
-class ScanBusyError(ValueError):
-    pass
-
-
-def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None, available=None):
+def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None, available=None, wait=False, can_start=None):
     plan = target if isinstance(target, Plan) else Plan('フォルダー検査', [Path(target).absolute()], [])
     plan = store.effective_plan(plan)
     cancel = cancel if cancel is not None else threading.Event()
@@ -335,18 +334,39 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
     binary = shutil.which('clamscan')
     if not binary:
         raise ValueError('ClamAVが見つかりません。')
-    settings = store.scan_options()
-    supported = supported_options(binary)
-    limits = store.scan_limits()
-    arguments = option_arguments(settings, supported) + limit_arguments(limits, supported)
     started = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
-    lock_path = Path(lock_path) if lock_path else Path.home() / '.clamdlog/clamscan.lock'
+    lane = lane_for(plan, files)
+    lock_path = Path(lock_path) if lock_path else default_lock_path(lane)
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = get_backend().lock(lock_path)
     try:
-        if not lock.acquire():
-            raise ScanBusyError('別の検査が実行中です。完了後に再実行してください。') from None
-        with track_scan(store, profile_id, started) as running:
+        with track_scan(store, profile_id, started, phase='waiting' if wait else 'running', lane=lane,
+                        deduplicate=True) as running:
+            while True:
+                reason = None
+                if wait and (cancel.is_set() or running.cancelled()):
+                    reason = '検査待ちを取り消しました。検査は実行していません。'
+                elif available is not None and not available():
+                    reason = '検査対象のメディアが取り外されました。'
+                elif can_start is not None and not can_start():
+                    reason = '予定が無効になったかプランが変更されたため、検査待ちを取り消しました。'
+                if reason:
+                    status = ScanStatus(reason, ResultKind.CANCELLED, started_at=datetime.datetime.now().astimezone().isoformat(timespec='seconds'))
+                    store.save(started, plan.describe(), status, reason, profile_id)
+                    return status, reason
+                if (not wait or running.is_next()) and lock.acquire():
+                    break
+                if not wait:
+                    raise ScanBusyError('別の検査が実行中です。') from None
+                cancel.wait(.5)
+            # Recheck the target after a potentially long wait, before starting ClamAV.
+            validate_profile(plan)
+            started = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
+            running.started(started)
+            settings = store.scan_options()
+            supported = supported_options(binary)
+            limits = store.scan_limits()
+            arguments = option_arguments(settings, supported) + limit_arguments(limits, supported)
             command = [binary, '--recursive', '--suppress-ok-results',
                        '--follow-file-symlinks=0', '--follow-dir-symlinks=0',
                        '--heuristic-alerts=yes', '--alert-exceeds-max=yes',
@@ -401,6 +421,8 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             output += '\n\n--- この検査で使用した設定 ---\n' + describe_options(settings, supported)
             output += '\n' + describe_limits(limits)
             output += '\n検査上限の警告・ヒューリスティック警告: 有効（固定）\n'
+            result = assess(status, output)
+            status = ScanStatus(str(status), result.kind, result.detected, started_at=started)
             store.save(started, plan.describe(), status, output, profile_id)
             return status, output
     finally:

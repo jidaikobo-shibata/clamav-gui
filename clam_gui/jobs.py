@@ -4,9 +4,10 @@ from .results import ResultKind, ScanStatus
 
 def execute_scan(plan, store, cancel=None, *, scanner=None, failure=None, **kwargs):
     from .core import scan, record_scan_failure, ScanBusyError
+    from .execution import ScanAlreadyQueued
     try:
         return (scanner or scan)(plan, store, cancel, **kwargs)
-    except ScanBusyError:
+    except (ScanBusyError, ScanAlreadyQueued):
         raise  # Automatic jobs retry contention; manual/scheduled callers record it.
     except Exception as error:
         try:

@@ -1,5 +1,6 @@
 """Bounded queues and cooperative jobs for foreground-only automatic scans."""
 from .jobs import execute_scan
+from .execution import ScanAlreadyQueued
 from .results import assess
 from dataclasses import dataclass
 import datetime
@@ -238,7 +239,7 @@ class Automation:
                 else:
                     kwargs['files'] = [item.path for item in batch]
                 status, output = execute_scan(plan, self.store, self.cancel, scanner=scanner, **kwargs)
-            except ScanBusyError:
+            except (ScanBusyError, ScanAlreadyQueued):
                 retry, status, output = True, '', ''
             except Exception as error:
                 status, output = record_scan_failure(self.store, plan, error, key)

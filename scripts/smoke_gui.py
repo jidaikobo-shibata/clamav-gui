@@ -13,7 +13,7 @@ with tempfile.TemporaryDirectory(prefix='clam-gui-smoke-') as root:
         directory = Path(root) / name
         directory.mkdir(mode=0o700)
         env[key] = str(directory)
-    env.update(GDK_BACKEND='wayland', WAYLAND_DISPLAY='clam-test', GTK_A11Y='none', GSK_RENDERER='cairo')
+    env.update(GIO_USE_VFS='local', GTK_USE_PORTAL='0', GDK_BACKEND='wayland', WAYLAND_DISPLAY='clam-test', GTK_A11Y='none', GSK_RENDERER='cairo')
     code = """from clam_gui.__main__ import Application
 from gi.repository import GLib, Gtk, Gio
 from pathlib import Path
@@ -240,6 +240,50 @@ def check():
         assert reason in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
         assert len(app.store.history_entries(blocked_key, blocked)) == 1
         notify.assert_called_once()
+    # Two manual requests: another plan stays available, waiting is visible and cancellable.
+    import threading
+    from clam_gui.results import ScanStatus, ResultKind
+    one = app.store.save_profile(Plan('手動キューA',[str(app.store.path.parent)],[]))
+    two = app.store.save_profile(Plan('手動キューB',[str(app.store.path.parent)],[]))
+    entered = {one:threading.Event(), two:threading.Event()}
+    def fake_manual(plan, store, cancel, **kwargs):
+        ident=kwargs['profile_id']
+        assert kwargs['wait'] is True
+        stamp=datetime.datetime.now().astimezone().isoformat()
+        with track_scan(store, ident, stamp, phase='running' if ident==one else 'waiting'):
+            entered[ident].set()
+            assert cancel.wait(3)
+        status=ScanStatus('検査待ち・検査を取り消しました',ResultKind.CANCELLED)
+        store.save(stamp,plan.describe(),status,'synthetic cancellation',ident)
+        return status,'synthetic cancellation'
+    def wait_manual(predicate):
+        deadline=time.monotonic()+3
+        while not predicate() and time.monotonic()<deadline:
+            GLib.MainContext.default().iteration(False);time.sleep(.001)
+        assert predicate()
+    with patch('clam_gui.__main__.scan',side_effect=fake_manual), patch.object(app,'send_notification'):
+        app.refresh_profiles(one)
+        app.plan_action(one,'run')
+        dialog=next(w for w in Gtk.Window.list_toplevels() if isinstance(w,Gtk.MessageDialog))
+        dialog.response(Gtk.ResponseType.OK)
+        wait_manual(lambda:entered[one].is_set())
+        app.poll_plans()
+        assert app.busy and app.plan_rows[two]['actions']['run'].get_enabled()
+        assert not app.plan_rows[one]['actions']['run'].get_enabled()
+        app.plan_action(two,'run')
+        dialog=next(w for w in Gtk.Window.list_toplevels() if isinstance(w,Gtk.MessageDialog))
+        dialog.response(Gtk.ResponseType.OK)
+        wait_manual(lambda:entered[two].is_set())
+        app.poll_plans()
+        assert '検査待ち' in app.plan_rows[two]['status'].get_text()
+        assert not app.plan_rows[two]['spinner'].get_spinning()
+        assert app.plan_rows[two]['actions']['stop'].get_enabled()
+        app.plan_action(two,'stop')
+        wait_manual(lambda:two not in app.manual_jobs)
+        assert app.busy and one in app.manual_jobs
+        app.plan_action(one,'stop')
+        wait_manual(lambda:not app.busy)
+        assert not app.manual_jobs
     # The main screen exposes local definition time and an update-only view.
     with patch('clam_gui.definitions.definition_update_label', return_value='定義ファイル更新：2026/11/17 08:00'):
         app.poll_plans()

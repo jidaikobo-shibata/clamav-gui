@@ -9,6 +9,7 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import Gio, GLib, Gtk, Pango
 from .core import Store, scan, record_scan_failure
 from .jobs import execute_scan
+from .execution import ScanAlreadyQueued
 from .schedule import Schedule, read_schedule, read_schedules
 from .automation import Automation, MEDIA_ID, media_plan
 from .background import Lease, enabled as background_enabled, heartbeat, request_media, watched_plans
@@ -29,6 +30,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         self.busy = False
         self.cancel = threading.Event()
         self.scan_key = None
+        self.manual_jobs = {}
         self.schedule_busy = False
         self.active_runs = []
         self.auto_generation = 0
@@ -239,7 +241,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
             switch_box.append(switch_label)
             switch = Gtk.Switch(valign=Gtk.Align.CENTER)
             switch.update_property([Gtk.AccessibleProperty.LABEL], [plan.label + 'の自動実行'])
-            switch.set_tooltip_text('今後の自動実行を切り替えます。実行中の検査は止めません。')
+            switch.set_tooltip_text('今後の自動実行を切り替えます。待機中の定期検査は取り消し、実行中の検査は続けます。')
             switch_box.append(switch)
             content.append(switch_box)
             group = Gio.SimpleActionGroup()
@@ -332,21 +334,25 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
             except Exception:
                 widgets['schedule'].set_text('予定を確認できません')
                 schedule = None
-            running = next((a for a in self.active_runs if a.profile_id == key), None)
-            unknown = failed or bool(running and not running.known)
+            plan_runs = [a for a in self.active_runs if a.profile_id == key]
+            running = next((a for a in plan_runs if a.phase == 'running'), next(iter(plan_runs), None))
+            unknown = failed or any(not a.known for a in plan_runs)
             automatic = widgets['plan'].kind != 'scheduled' and schedule is not None and schedule.enabled
             widgets['status_box'].set_visible(bool(running) or unknown or automatic)
             widgets['status'].set_text('実行状態を確認できません' if unknown else running.describe() if running else self.monitor_status(key, background, remote) if automatic else '')
-            widgets['spinner'].set_spinning(bool(running and running.known and not running.stopping))
-            widgets['spinner'].set_visible(bool(running and running.known))
+            waiting_count = sum(a.phase == 'waiting' for a in plan_runs if a is not running)
+            if waiting_count and not unknown:
+                widgets['status'].set_text(widgets['status'].get_text() + f'\nほかに検査待ち：{waiting_count}件')
+            widgets['spinner'].set_spinning(bool(running and running.known and not running.stopping and running.phase == 'running'))
+            widgets['spinner'].set_visible(bool(running and running.known and running.phase == 'running'))
             blocked = self.schedule_busy or (self.busy and self.scan_key is None)
             widgets['switch'].set_sensitive(not blocked and schedule is not None and not widgets['plan'].requires_admin)
             for name in ('edit', 'duplicate', 'delete'):
                 if name in widgets['actions']:
                     widgets['actions'][name].set_enabled(not self.busy and not self.schedule_busy and not running and not unknown)
-            widgets['actions']['run'].set_enabled(not self.busy and not self.schedule_busy and not self.active_runs and
+            widgets['actions']['run'].set_enabled((not self.busy or bool(self.manual_jobs)) and not self.schedule_busy and not running and key not in self.manual_jobs and
                                                    not failed and not widgets['plan'].requires_admin)
-            widgets['actions']['stop'].set_enabled(bool(running and running.known and not running.stopping))
+            widgets['actions']['stop'].set_enabled(bool(running and running.known and not running.stopping) or key in self.manual_jobs)
         if previous is not None and previous != [(a.token, a.stopping, a.known) for a in self.active_runs]:
             self.history(None)
         return True
@@ -356,7 +362,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         if name == 'stop':
             self.stop_plan(key)
             return
-        if self.schedule_busy or self.busy:
+        if self.schedule_busy or (self.busy and (name != 'run' or not self.manual_jobs)):
             return
         self.poll_plans()
         widgets = self.plan_rows.get(key)
@@ -440,8 +446,8 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
             for activity in activities(self.store):
                 if activity.profile_id == key and activity.known:
                     request_stop(self.store, activity.token)
-            if self.scan_key == key:
-                self.cancel.set()
+            if key in self.manual_jobs:
+                self.manual_jobs[key].set()
             self.poll_plans()
         except Exception as error:
             self.show_notice('中止を依頼できませんでした：' + str(error))
@@ -490,7 +496,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
     def tick_automation(self):
         self.configure_automation()
         if not background_enabled(self.store) and self.monitor_lease.file:
-            self.automation.tick(blocked=self.busy or self.schedule_busy or bool(self.active_runs))
+            self.automation.tick(blocked=self.schedule_busy or (self.busy and not self.manual_jobs))
         return True
 
 
@@ -559,41 +565,63 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
 
 
     def confirm(self, plan, key=None):
-        if self.busy:
+        if self.busy and not self.manual_jobs:
+            return
+        if key in self.manual_jobs:
+            self.show_notice('この検査プランはすでに実行中または検査待ちです。')
             return
         self.refresh_profiles(key)
         try:
             plan = self.store.effective_plan(plan)
         except Exception as error:
-            self.finished(*record_scan_failure(self.store, plan, error, key))
+            self.finished(*record_scan_failure(self.store, plan, error, key), key=key)
             return
         dialog = Gtk.MessageDialog(transient_for=self.operation_parent(), modal=True,
             message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
             text='この範囲を検査しますか？', secondary_text=plan.describe())
         def response(window, answer):
             window.destroy()
-            if answer == Gtk.ResponseType.OK and not self.busy:
+            if answer == Gtk.ResponseType.OK and (not self.busy or self.manual_jobs):
+                if key in self.manual_jobs:
+                    self.show_notice('この検査プランはすでに実行中または検査待ちです。')
+                    return
+                cancel = threading.Event()
+                self.manual_jobs[key] = cancel
                 self.busy = True
-                self.cancel.clear()
-                self.set_controls(False)
                 self.scan_key = key
-                self.poll_plans()
-                self.show_notice('検査中：' + plan.label)
-                threading.Thread(target=self.run_scan, args=(plan, key), daemon=True).start()
+                self.set_controls(False)
+                self.show_notice('検査を受け付けました：' + plan.label)
+                try:
+                    threading.Thread(target=self.run_scan, args=(plan, key, cancel), daemon=True).start()
+                except Exception as error:
+                    self.finished(*record_scan_failure(self.store, plan, error, key), key=key)
         dialog.connect('response', response)
         dialog.present()
 
-    def run_scan(self, target, key):
+    def run_scan(self, target, key, cancel=None):
         try:
-            status, output = execute_scan(target, self.store, self.cancel, scanner=scan, profile_id=key)
+            status, output = execute_scan(target, self.store, cancel or self.cancel, scanner=scan,
+                                          profile_id=key, wait=True)
+        except ScanAlreadyQueued as error:
+            GLib.idle_add(self.duplicate_scan, key, str(error))
+            return
         except Exception as error:
             status, output = record_scan_failure(self.store, target, error, key)
-        GLib.idle_add(self.finished, status, output)
+        GLib.idle_add(self.finished, status, output, key)
 
-    def finished(self, status, output):
-        self.busy = False
-        self.scan_key = None
-        self.set_controls(True)
+    def release_manual_job(self, key):
+        self.manual_jobs.pop(key, None)
+        self.busy = bool(self.manual_jobs)
+        self.scan_key = next(iter(self.manual_jobs), None)
+        self.set_controls(not self.busy)
+
+    def duplicate_scan(self, key, message):
+        self.release_manual_job(key)
+        self.show_notice(message)
+        return False
+
+    def finished(self, status, output, key=None):
+        self.release_manual_job(key)
         self.history(None)
         self.history_list.select_row(self.history_list.get_row_at_index(0))
         self.show_notice(status)
