@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+from .retention import DEFAULTS as AUTOMATION_DEFAULTS, validate as validate_automation, prune
 from .runtime import track_scan
 from .mailboxes import MAILBOX_NOTE, mailbox_findings, mailbox_guidance
 from .options import DEFAULTS, supported_options, option_arguments, describe_options, LIMITS, validate_limits, limit_arguments, describe_limits
@@ -44,7 +45,7 @@ class Store:
             if 'profile_id' not in {row[1] for row in db.execute('PRAGMA table_info(scans)')}:
                 db.execute('ALTER TABLE scans ADD COLUMN profile_id TEXT')
             columns = {row[1] for row in db.execute('PRAGMA table_info(scans)')}
-            for column, kind in [('completed_at', 'TEXT'), ('detected', 'INTEGER')]:
+            for column, kind in [('completed_at', 'TEXT'), ('detected', 'INTEGER'), ('log_bytes', 'INTEGER')]:
                 if column not in columns:
                     db.execute(f'ALTER TABLE scans ADD COLUMN {column} {kind}')
             db.execute('CREATE TABLE IF NOT EXISTS profiles '
@@ -68,12 +69,34 @@ class Store:
             db.close()
 
     def save(self, started, target, status, output, profile_id=None):
+        encoded = output.encode('utf-8')
+        if len(encoded) > 2 * 1024 * 1024:
+            output = '出力が大きいため末尾のみ保存しています。\n' + encoded[-2*1024*1024:].decode('utf-8', errors='replace')
+        size = len((target + status + output).encode('utf-8')) + 128
+        policy = self.automation_settings()
         with self.connect() as db:
-            db.execute('INSERT INTO scans (started, target, status, output, profile_id, completed_at, detected) '
-                       'VALUES (?, ?, ?, ?, ?, ?, ?)',
+            db.execute('INSERT INTO scans (started, target, status, output, profile_id, completed_at, detected, log_bytes) '
+                       'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                        (started, target, status, output, profile_id,
                         datetime.datetime.now().astimezone().isoformat(timespec='seconds'),
-                        int(has_detection(status, output))))
+                        int(has_detection(status, output)), size))
+            prune(db, policy)
+
+    def automation_settings(self):
+        with self.connect() as db:
+            row = db.execute('SELECT value FROM preferences WHERE key=?', ('automation',)).fetchone()
+        values = dict(AUTOMATION_DEFAULTS)
+        if row:
+            values.update(json.loads(row[0]))
+        validate_automation(values)
+        return values
+
+    def set_automation_settings(self, values):
+        validate_automation(values)
+        with self.connect() as db:
+            db.execute('INSERT INTO preferences VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                       ('automation', json.dumps(values)))
+            return prune(db, values)
 
     def recent(self):
         with self.connect() as db:
@@ -121,14 +144,20 @@ class Store:
         validate_limits(values)
         return values
 
-    def set_scan_preferences(self, settings, limits):
+    def set_scan_preferences(self, settings, limits, automation=None):
         if set(settings) != set(DEFAULTS) or any(type(value) is not bool for value in settings.values()):
             raise ValueError('検査設定が不正です。')
         validate_limits(limits)
         with self.connect() as db:
-            for key, value in [('scan-options', settings), ('scan-limits', limits)]:
+            entries = [('scan-options', settings), ('scan-limits', limits)]
+            if automation is not None:
+                validate_automation(automation)
+                entries.append(('automation', automation))
+            for key, value in entries:
                 db.execute('INSERT INTO preferences VALUES (?, ?) ON CONFLICT(key) '
                            'DO UPDATE SET value=excluded.value', (key, json.dumps(value)))
+            if automation is not None:
+                prune(db, automation)
 
     def phishing_enabled(self):
         options = self.scan_options()
@@ -151,14 +180,20 @@ class Store:
 
     def save_profile(self, plan, key=None):
         validate_profile(plan)
-        plan = Plan(plan.label, [os.path.normpath(str(p)) for p in plan.targets],
-                    [os.path.normpath(str(p)) for p in plan.excludes], plan.phishing,
-                    [os.path.normpath(str(p)) for p in plan.excluded_dirs], plan.requires_admin)
+        if plan.kind == 'watch' and any(Path(plan.targets[0]) == path or path in Path(plan.targets[0]).parents
+                                       for path in (self.path.parent, Path.home()/'.clamdlog')):
+            raise ValueError('アプリ自身の保存先・ロック用フォルダーは監視できません。')
+        if plan.kind == 'media' or key == 'external-media':
+            raise ValueError('外部メディア検査は環境設定で管理してください。')
+        plan = replace(plan, targets=[os.path.normpath(str(p)) for p in plan.targets],
+                       excludes=[os.path.normpath(str(p)) for p in plan.excludes],
+                       excluded_dirs=[os.path.normpath(str(p)) for p in plan.excluded_dirs])
         key = key or str(uuid.uuid4())
         data = json.dumps(dict(targets=[str(p) for p in plan.targets],
                                excludes=[str(p) for p in plan.excludes],
                                excluded_dirs=[str(p) for p in plan.excluded_dirs],
-                               phishing=plan.phishing, requires_admin=plan.requires_admin))
+                               phishing=plan.phishing, requires_admin=plan.requires_admin,
+                               kind=plan.kind, watch_recursive=plan.watch_recursive))
         with self.connect() as db:
             db.execute('INSERT INTO profiles VALUES (?, ?, ?) '
                        'ON CONFLICT(id) DO UPDATE SET name=excluded.name, data=excluded.data',
@@ -245,9 +280,13 @@ class Plan:
     phishing: bool = True
     excluded_dirs: list = field(default_factory=list)
     requires_admin: bool = False
+    kind: str = 'scheduled'
+    watch_recursive: bool = True
 
     def describe(self, include_policy=True):
         lines = [self.label, '対象:'] + [str(p) for p in self.targets]
+        if self.kind == 'watch':
+            lines += ['検査方法：フォルダー監視（アプリ起動中）']
         if self.excludes:
             lines += ['除外（ファイルの完全一致）:'] + [str(p) for p in self.excludes]
         if self.excluded_dirs:
@@ -262,6 +301,8 @@ class Plan:
 
 
 def validate_profile(plan):
+    if plan.kind not in ('scheduled', 'watch', 'media') or type(plan.watch_recursive) is not bool:
+        raise ValueError('検査プランの種類・監視範囲が不正です。')
     if not plan.label.strip():
         raise ValueError('検査プランの名前を入力してください。')
     if len(plan.targets) != 1 or not Path(plan.targets[0]).is_absolute():
@@ -329,13 +370,23 @@ def record_scan_failure(store, plan, error, profile_id=None, started=None):
     return status, output
 
 
-def scan(target, store, cancel=None, lock_path=None, profile_id=None):
+class ScanBusyError(ValueError):
+    pass
+
+
+def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None, available=None):
     plan = target if isinstance(target, Plan) else Plan('フォルダー検査', [Path(target).absolute()], [])
     plan = store.effective_plan(plan)
     cancel = cancel if cancel is not None else threading.Event()
     if plan.requires_admin:
         raise ValueError('この設定は管理者権限が必要です。GUIでの実行にはまだ対応していません。')
+    if available is not None and not available():
+        raise ValueError('検査対象のメディアが取り外されました。')
     validate_profile(plan)
+    if files is not None:
+        from .automation import allowed_file
+        if not files or len(files) > 50 or any(not allowed_file(plan, path) for path in files):
+            raise ValueError('監視対象のファイルが消失・変更されたか、検査範囲外です。')
     binary = shutil.which('clamscan')
     if not binary:
         raise ValueError('ClamAVが見つかりません。')
@@ -350,28 +401,33 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise ValueError('別の検査が実行中です。完了後に再実行してください。') from None
+            raise ScanBusyError('別の検査が実行中です。完了後に再実行してください。') from None
         with track_scan(store, profile_id, started) as running:
             command = [binary, '--recursive', '--suppress-ok-results',
+                       '--follow-file-symlinks=0', '--follow-dir-symlinks=0',
                        '--heuristic-alerts=yes', '--alert-exceeds-max=yes',
                        '--fail-if-cvd-older-than=3']
+            if plan.kind == 'media':
+                command.append('--cross-fs=no')
             command += arguments
             command += ['--exclude=^' + re.escape(str(p)) + '$' for p in plan.excludes]
             command += ['--exclude-dir=^' + re.escape(os.path.normpath(str(p))) + r'(/|$)'
                         for p in plan.excluded_dirs]
-            command += ['--'] + [str(p) for p in plan.targets]
+            command += ['--'] + [str(p) for p in (files if files is not None else plan.targets)]
             # A temporary file avoids pipe deadlocks and unbounded in-memory output.
             with tempfile.TemporaryFile() as log:
                 try:
                     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                                env={**os.environ, 'LC_ALL': 'C'})
                     cancelled = False
+                    removed = False
                     while True:
                         try:
                             code = process.wait(timeout=0.2)
                             break
                         except subprocess.TimeoutExpired:
-                            if cancel.is_set() or running.cancelled():
+                            if cancel.is_set() or running.cancelled() or (available is not None and not available()):
+                                removed = available is not None and not available()
                                 cancelled = True
                                 process.terminate()
                                 try:
@@ -386,6 +442,10 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None):
                     if size > 2 * 1024 * 1024:
                         output = 'WARNING: 出力が大きいため末尾2 MiBのみ保存しています。\n' + output
                     status = summarize(code, output, cancelled)
+                    if removed or (available is not None and not available()):
+                        status = '検査不完了：検査対象のメディアが取り外されました。'
+                    if files is not None:
+                        output += '\n\n--- 監視による検査ファイル ---\n' + '\n'.join(map(str, files))
                 except OSError as error:
                     status, output = '検査不完了：ClamAVを実行できませんでした', str(error)
             findings = mailbox_findings(output, plan.targets)

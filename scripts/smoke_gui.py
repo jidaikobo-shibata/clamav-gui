@@ -31,6 +31,12 @@ patch('clam_gui.__main__.supported_options', return_value=set(DEFAULTS) | set(LI
 standard = dict(DEFAULTS, **{'phishing-sigs': True, 'phishing-scan-urls': True, 'alert-encrypted': False})
 patch('clam_gui.__main__.standard_defaults', return_value=standard).start()
 patch('clam_gui.__main__.engine_status', return_value='ClamAV test engine').start()
+from clam_gui.gio_watch import Observers
+class TestVolumes:
+    def get_mounts(self): return []
+    def connect(self, *args): return len(args)
+    def disconnect(self, *args): pass
+patch('clam_gui.__main__.Observers', side_effect=lambda engine: Observers(engine, TestVolumes())).start()
 app = Application()
 def check():
     assert app.install_prompt_checked and app.install_prompt is None
@@ -285,6 +291,75 @@ def check():
             assert any(isinstance(w, Gtk.Label) and 'mock authorization rejected' in w.get_text() for w in widgets)
             auto_service.return_value.status.return_value = AutoUpdateState(True, True, True, 24)
             window.close()
+    # Real local directory events and synthetic media, with a fake scanner only.
+    from clam_gui.automation import MEDIA_ID, Media, media_plan
+    watched = Path(app.store.path.parent).parent/'watched-fixture'
+    watched.mkdir()
+    (watched/'excluded').mkdir()
+    watch_plan = Plan('監視試験', [str(watched)], [], excluded_dirs=[str(watched/'excluded')], kind='watch')
+    watch_key = app.store.save_profile(watch_plan)
+    save_schedule(app.store, watch_key, Schedule(enabled=True))
+    calls = []
+    def fake_auto_scan(plan, store, cancel, **kwargs):
+        assert plan.kind in ('watch', 'media')
+        assert str(plan.targets[0]) != '/'
+        calls.append(kwargs)
+        output = 'Scanned files: 2'
+        store.save(datetime.datetime.now().astimezone().isoformat(), plan.describe(), '検査完了', output, kwargs['profile_id'])
+        return '検査完了', output
+    app.automation.scanner = fake_auto_scan
+    app.automation.queue.quiet = .05
+    app.refresh_profiles(watch_key)
+    def wait_until(predicate):
+        deadline = time.monotonic() + 4
+        while not predicate() and time.monotonic() < deadline:
+            GLib.MainContext.default().iteration(False)
+            time.sleep(.001)
+        assert predicate()
+    wait_until(lambda: (watch_key, str(watched)) in app.observers.monitors)
+    temporary = watched/'browser.crdownload'
+    temporary.write_text('synthetic download')
+    temporary.rename(watched/'ready.txt')
+    (watched/'second.txt').write_text('synthetic second file')
+    (watched/'excluded'/'ignored.txt').write_text('not scanned')
+    wait_until(lambda: len(calls) >= 1 and not app.automation.active)
+    assert len(calls) == 1
+    assert set(calls[0]['files']) == {str(watched/'ready.txt'), str(watched/'second.txt')}
+    assert len(app.store.history_entries(watch_key, watch_plan)) == 1
+    assert app.plan_rows[watch_key]['schedule'].get_text().startswith('追加・変更時')
+    app.plan_rows[watch_key]['more'].activate_action('plan.edit', None)
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+    widgets = list(descendants(editor))
+    type_choice = next(w for w in widgets if isinstance(w, Gtk.DropDown) and w.get_model().get_n_items() == 2)
+    assert type_choice.get_selected() == 1
+    editor.destroy()
+    with patch('clam_gui.__main__.Scheduler') as scheduler:
+        scheduler.return_value.apply.side_effect = lambda key, schedule: save_schedule(app.store, key, schedule)
+        app.plan_rows[watch_key]['switch'].set_active(False)
+        wait_until(lambda: not app.schedule_busy)
+    assert not any(ident[0] == watch_key for ident in app.observers.monitors)
+    values = app.store.automation_settings()
+    values['media_enabled'] = True
+    app.store.set_automation_settings(values)
+    app.refresh_profiles(MEDIA_ID)
+    assert MEDIA_ID in app.plan_rows
+    assert 'delete' not in app.plan_rows[MEDIA_ID]['actions']
+    assert 'duplicate' not in app.plan_rows[MEDIA_ID]['actions']
+    info = watched.stat()
+    app.automation.add_media(Media('fake-usb', str(watched), 'Synthetic USB', (info.st_dev, info.st_ino)))
+    wait_until(lambda: len(calls) == 2 and not app.automation.active)
+    assert calls[1]['profile_id'] == MEDIA_ID
+    app.plan_rows[MEDIA_ID]['switch'].set_active(False)
+    assert MEDIA_ID not in app.plan_rows
+    assert len(app.store.history_entries(MEDIA_ID, media_plan())) == 1
+    app.media_history()
+    media_window = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '外部メディア検査の履歴')
+    media_window.destroy()
+    with patch.object(app, 'send_notification') as notifications:
+        app.flush_automatic_notice(watch_key)
+        app.flush_automatic_notice(MEDIA_ID)
+        assert notifications.call_count == 2
+    app.automation.scanner = None
     # Exercise editor persistence and recovery without registering actual timers.
     from clam_gui.schedule import save_schedule, read_schedule
     import time
@@ -295,7 +370,7 @@ def check():
     enabled = next(w for w in fields if isinstance(w, Gtk.CheckButton) and w.get_label() == '定期検査を有効にする')
     assert not enabled.get_active()
     enabled.set_active(True)
-    frequency = next(w for w in fields if isinstance(w, Gtk.DropDown))
+    frequency = next(w for w in fields if isinstance(w, Gtk.DropDown) and w.get_model().get_n_items() == 5)
     frequency.set_selected(4)
     interval = next(w for w in fields if isinstance(w, Gtk.SpinButton) and w.get_parent().get_first_child().get_text() == '間隔（1〜1440分）')
     assert interval.get_parent().get_visible()
@@ -341,7 +416,7 @@ def check():
     assert len(preferences) == 1
     widgets = list(descendants(preferences[0]))
     checks = [w for w in widgets if isinstance(w, Gtk.CheckButton)]
-    assert len(checks) == 22
+    assert len(checks) == 24
     phishing = next(w for w in checks if w.get_label() == 'メールのフィッシング検査')
     assert not phishing.get_active()
     phishing.set_active(True)
@@ -350,7 +425,7 @@ def check():
         save = next(w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() == '検査設定を保存')
         if not save.get_sensitive():
             return True
-        spins = [w for w in widgets if isinstance(w, Gtk.SpinButton)]
+        spins = [w for w in widgets if isinstance(w, Gtk.SpinButton) and isinstance(w.get_parent().get_first_child(), Gtk.CheckButton)]
         limit_checks = [w for w in checks if w.get_label() == 'ClamAV標準値を使う']
         assert len(spins) == 2 and len(limit_checks) == 2
         for check in limit_checks:

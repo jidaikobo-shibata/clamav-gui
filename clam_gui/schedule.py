@@ -126,6 +126,7 @@ class Scheduler:
             validate_profile(plan)
         if schedule.enabled and plan.requires_admin:
             raise ValueError('管理者権限が必要な対象は定期実行できません。')
+        is_watch = plan.kind == 'watch'
         content = self.units(key, schedule)
         paths = self.paths(key)
         previous = {}
@@ -136,16 +137,19 @@ class Scheduler:
             if previous[path] is not None and not previous[path].startswith(MARKER):
                 raise ValueError('このアプリが管理していないファイルがあるため停止しました。')
         old = read_schedule(self.store, key)
+        if is_watch and all(text is None for text in previous.values()):
+            save_schedule(self.store, key, schedule)
+            return
         self.unit_dir.mkdir(parents=True, exist_ok=True)
         try:
-            if schedule.enabled:
+            if schedule.enabled and not is_watch:
                 for path, text in zip(paths, content):
                     self.write(path, text)
                 save_schedule(self.store, key, schedule)
                 self.run('daemon-reload')
                 self.run('enable', '--now', paths[1].name)
                 self.run('restart', paths[1].name)
-            elif paths[1].exists() or old.enabled:
+            elif paths[1].exists() or (old.enabled and not is_watch):
                 # Disable future starts; a scan already running is left to finish.
                 self.run('disable', '--now', paths[1].name)
             save_schedule(self.store, key, schedule)
@@ -159,7 +163,7 @@ class Scheduler:
                     else:
                         self.write(path, text)
                 self.run('daemon-reload')
-                if old.enabled:
+                if old.enabled and previous[paths[1]] is not None:
                     self.run('enable', '--now', paths[1].name)
             except Exception as recovery:
                 raise RuntimeError('予定登録に失敗し、復元も完了できませんでした。systemdの状態を確認してください。') from recovery

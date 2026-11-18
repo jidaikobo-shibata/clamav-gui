@@ -210,3 +210,13 @@ python3 -m unittest discover -s tests -v
 - [GNOME Human Interface Guidelines](https://developer.gnome.org/hig/)
 
 launchdの具体的な登録・解除コマンドは、対象macOSの `man launchctl` と `man launchd.plist` でも確認してください。
+
+## 自動検査の追加部分
+
+`automation.py`はOS非依存の待機キュー、`gio_watch.py`はGIOのフォルダー・
+ボリューム監視です。現在はGTKメインループがある間だけ動作します。
+macOS移植ではGIOの実機対応状況を確認し、必要なら監視部分を差し替えてください。
+終了中の監視を保証するには別途常駐プロセスの設計が必要です。
+`retention.py`はSQLiteの履歴保持ポリシーです。既存データの自動削除は
+初期状態で無効にし、GUIの確認を維持してください。
+テストは一時フォルダーと模擬ボリュームを使い、実メディア・実ユーザー設定を変更しません。

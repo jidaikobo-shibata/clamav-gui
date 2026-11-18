@@ -23,7 +23,7 @@ def main():
     if plan is None:
         print('検査プランが見つかりません。', file=sys.stderr)
         return 2
-    if not read_schedule(store, args.profile).enabled:
+    if plan.kind != 'scheduled' or not read_schedule(store, args.profile).enabled:
         return 0
     cancel = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
