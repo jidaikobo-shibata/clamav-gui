@@ -12,7 +12,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
-from .retention import DEFAULTS as AUTOMATION_DEFAULTS, validate as validate_automation, prune
+from .retention import DEFAULTS as AUTOMATION_DEFAULTS, validate as validate_automation, prune, initialize as initialize_retention
 from .execution import ScanBusyError, ScanAlreadyQueued, lane_for, lock_path as default_lock_path
 from .runtime import track_scan
 from .platforms import get_backend
@@ -62,6 +62,10 @@ class Store:
                        '(token TEXT PRIMARY KEY, phase TEXT NOT NULL, lane TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS preferences '
                        '(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+            db.execute('CREATE INDEX IF NOT EXISTS scans_profile ON scans(profile_id)')
+            db.execute('CREATE INDEX IF NOT EXISTS scans_legacy_target ON scans(target) WHERE profile_id IS NULL')
+        with self.connect() as db:
+            initialize_retention(db)
         self.path.chmod(0o600)
         self.preferences = Preferences(self.connect)
 
@@ -81,12 +85,15 @@ class Store:
             output = '出力が大きいため末尾のみ保存しています。\n' + encoded[-2*1024*1024:].decode('utf-8', errors='replace')
         size = len((target + status + output).encode('utf-8')) + 128
         policy = self.automation_settings()
+        completed = datetime.datetime.now().astimezone()
         with self.connect() as db:
-            db.execute('INSERT INTO scans (started, target, status, output, profile_id, completed_at, detected, log_bytes, result_kind) '
+            cursor = db.execute('INSERT INTO scans (started, target, status, output, profile_id, completed_at, detected, log_bytes, result_kind) '
                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                        (started, target, status, output, profile_id,
-                        datetime.datetime.now().astimezone().isoformat(timespec='seconds'),
+                        completed.isoformat(timespec='seconds'),
                         int(result.detected), size, result.kind.value))
+            db.execute('INSERT INTO retention_info VALUES (?,?,?,?)',
+                       (cursor.lastrowid, completed.replace(microsecond=0).timestamp(), int(not result.clean), size))
             prune(db, policy)
 
     def automation_settings(self):
@@ -118,6 +125,34 @@ class Store:
                               'FROM scans WHERE profile_id=? OR (profile_id IS NULL AND target=?) '
                               'ORDER BY rowid DESC LIMIT 100', (key, plan.describe())).fetchall()
         return [HistoryEntry(*row) for row in rows]
+
+    def history_headers(self, key, plan):
+        # Fetch at most 100 IDs from each indexed branch, then only small fields.
+        with self.connect() as db:
+            modern = db.execute('SELECT rowid FROM scans WHERE profile_id=? ORDER BY rowid DESC LIMIT 100', (key,)).fetchall()
+            legacy = db.execute('SELECT rowid FROM scans WHERE profile_id IS NULL AND target=? ORDER BY rowid DESC LIMIT 100', (plan.describe(),)).fetchall()
+            ids = sorted({row[0] for row in modern + legacy}, reverse=True)[:100]
+            if not ids:
+                return []
+            rows = db.execute("SELECT rowid,started,completed_at,detected,'',status,'',result_kind FROM scans WHERE rowid IN ("+
+                              ','.join('?' for _ in ids)+') ORDER BY rowid DESC', ids).fetchall()
+            result = []
+            for row in rows:
+                entry = HistoryEntry(*row)
+                if entry.completed_at is None or entry.detected is None:
+                    # Old logs need one-at-a-time decoding; never retain all their bodies.
+                    body = db.execute('SELECT output FROM scans WHERE rowid=?', (entry.id,)).fetchone()
+                    full = replace(entry, output=body[0] if body else '')
+                    entry = replace(entry, completed_at=full.completion_timestamp(), detected=int(full.is_detected()))
+                result.append(entry)
+            return result
+
+    def history_entry(self, ident, key, plan):
+        with self.connect() as db:
+            row = db.execute('SELECT rowid,started,completed_at,detected,target,status,output,result_kind '
+                             'FROM scans WHERE rowid=? AND (profile_id=? OR (profile_id IS NULL AND target=?))',
+                             (ident, key, plan.describe())).fetchone()
+        return HistoryEntry(*row) if row else None
 
     def scan_options(self):
         rows = self.preferences.get_many(['phishing', 'scan-options'])
@@ -238,12 +273,16 @@ class HistoryEntry:
     output: str
     result_kind: str | None = None
 
-    def date_label(self):
+    def completion_timestamp(self):
         value = self.completed_at
         if not value:
             match = re.search(r'^End Date:\s*(.+)$', self.output, re.M)
             if match:
                 value = match[1].strip().replace(':', '-', 2)
+        return value
+
+    def date_label(self):
+        value = self.completion_timestamp()
         try:
             date = datetime.datetime.fromisoformat(value or self.started)
             text = date.strftime('%Y/%m/%d %H:%M:%S')

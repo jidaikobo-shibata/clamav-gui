@@ -5,7 +5,7 @@ import json
 import time
 from .platforms import get_backend
 from .automation import Automation, MEDIA_ID, signature, SIGNATURE_VERSION
-from .background import Lease, enabled, watched_plans, preference, put_preference
+from .background import Lease, watched_plans, preference, put_preference
 from gi.repository import GLib
 
 
@@ -74,6 +74,8 @@ class Checkpoints:
 
     def complete_baseline(self, monitors):
         self.flush()
+        if self.ready.issuperset(self.roots):
+            return
         with self.store.connect() as db:
             for key, config in self.roots.items():
                 if key not in self.ready and key not in self.engine.errors and (key, str(self.engine.plans[key].targets[0])) in monitors:
@@ -113,6 +115,10 @@ class Monitor:
         self.last_tick = time.time()
         self.started = False
         self.last_config_time = 0
+        self.last_control = self.last_publish = float('-inf')
+        self.last_state = None
+        self.control = True
+        self.command_value = {}
         self.generation = __import__('uuid').uuid4().hex
 
     def changed(self):
@@ -131,13 +137,20 @@ class Monitor:
             self.notifier(notice.title, notice.body, notice.urgency)
 
     def tick(self):
-        if self.stopping or not enabled(self.store):
+        now = time.monotonic()
+        if now - self.last_control >= 1:
+            controls = self.store.preferences.get_many(('background-enabled', 'background-command'))
+            self.control = controls.get('background-enabled') is True
+            self.command_value = controls.get('background-command', {})
+            self.last_control = now
+        if self.stopping or not self.control:
             self.stop()
             if not self.engine.active:
                 self.loop.quit()
                 return False
             return True
         if not self.lease.acquire():
+            self.last_control = float('-inf')
             return True  # GUI finishes any scan before yielding monitoring ownership.
         now = time.monotonic()
         resumed = time.time()-self.last_tick > 15
@@ -154,9 +167,9 @@ class Monitor:
                 self.observers.scan_connected()
             self.started = True
             self.last_config_time = now
-        if not self.observers.tasks:
+        if not getattr(self.observers, 'discovering', self.observers.tasks):
             self.checkpoints.complete_baseline(self.observers.monitors)
-        command = preference(self.store, 'background-command', {})
+        command = self.command_value
         if command and command.get('token') != self.command:
             self.command = command.get('token')
             if command.get('action') == 'media' and time.time()-command.get('created', 0) < 30:
@@ -169,7 +182,13 @@ class Monitor:
         statuses[MEDIA_ID] = self.engine.status(MEDIA_ID)
         if not __import__('shutil').which('clamscan'):
             statuses = {key: 'ClamAV未導入：検査待ちを保持しています' for key in statuses}
-        put_preference(self.store, 'background-state', dict(updated=time.time(), generation=self.generation, revision=self.revision, statuses=statuses, active=self.engine.active_key, notifications=self.outbox.state()))
+        # Publish changed state promptly; keep the eight-second lease fresh at
+        # three-second intervals without rewriting identical state twice a second.
+        state = dict(generation=self.generation, revision=self.revision, statuses=statuses,
+                     active=self.engine.active_key, notifications=self.outbox.cached_state())
+        if state != self.last_state or now - self.last_publish >= 3:
+            put_preference(self.store, 'background-state', dict(updated=time.time(), **state))
+            self.last_state, self.last_publish = state, now
         return True
 
     def checked_tick(self):

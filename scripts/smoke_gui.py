@@ -14,6 +14,7 @@ with tempfile.TemporaryDirectory(prefix='clam-gui-smoke-') as root:
         directory.mkdir(mode=0o700)
         env[key] = str(directory)
     env.update(GIO_USE_VFS='local', GTK_USE_PORTAL='0', GDK_BACKEND='wayland', WAYLAND_DISPLAY='clam-test', GTK_A11Y='none', GSK_RENDERER='cairo')
+    env['SMOKE_RESULT'] = str(Path(root) / 'success')
     code = """from clam_gui.__main__ import Application
 from gi.repository import GLib, Gtk, Gio
 from pathlib import Path
@@ -38,6 +39,16 @@ class TestVolumes:
     def disconnect(self, *args): pass
 patch('clam_gui.gio_watch.Observers', side_effect=lambda engine: Observers(engine, TestVolumes())).start()
 app = Application()
+def settle_history(controller=None):
+    import time
+    controller = controller or app.history_controller
+    deadline = time.monotonic() + 5
+    context = GLib.MainContext.default()
+    while controller.reader.busy and time.monotonic() < deadline:
+        context.iteration(False)
+        time.sleep(0.001)
+    assert not controller.reader.busy, 'history read timed out'
+
 def check():
     assert app.install_prompt_checked and app.install_prompt is None
     with patch('clam_gui.__main__.shutil.which', return_value=None), patch.object(app, 'package_setup') as setup:
@@ -102,13 +113,16 @@ def check():
     app.store.save('2026-11-16T10:00:00+09:00', plan.describe(), '検査完了', 'normal log', key)
     app.store.save('2026-11-16T11:00:00+09:00', plan.describe(), '検出あり' + MAILBOX_NOTE, mailbox_guidance([('/example/INBOX', False)]), key)
     app.refresh_profiles(key)
+    settle_history()
     assert len(app.log_entries) == 2
     assert app.history_list.get_row_at_index(0).get_child().get_attributes() is not None
     assert app.history_list.get_row_at_index(1).get_child().get_attributes() is None
     app.history_list.select_row(app.history_list.get_row_at_index(0))
+    settle_history()
     buffer = app.result.get_buffer()
     assert '保存ファイル自体は削除せず' in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
     app.history_list.select_row(app.history_list.get_row_at_index(1))
+    settle_history()
     buffer = app.result.get_buffer()
     assert 'normal log' in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
     def descendants(widget):
@@ -133,8 +147,10 @@ def check():
     app.plan_list.select_row(app.plan_rows[other_key]['row'])
     assert app.selected_profile()[0] == other_key
     assert app.selected_plan_title.get_text() == other_plan.label
+    settle_history()
     buffer = app.result.get_buffer()
     assert 'other plan log' in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+    settle_history()
     assert len(app.log_entries) == 1
     app.poll_plans()
     assert app.selected_profile()[0] == other_key
@@ -144,6 +160,7 @@ def check():
     assert next(w for w in descendants(editor) if isinstance(w, Gtk.Entry)).get_text() == plan.label
     editor.destroy()
     app.plan_list.select_row(app.plan_rows[key]['row'])
+    settle_history()
     assert len(app.log_entries) == 2
     assert app.add_plan_button.get_action_name() == 'app.new-target'
     # Adding from the manager must not save on cancel.
@@ -235,7 +252,9 @@ def check():
         assert not app.busy
         assert reason in app.notice.get_text()
         assert app.selected_profile()[0] == blocked_key
+        settle_history()
         assert reason in app.log_entries[0].status
+        settle_history()
         buffer = app.result.get_buffer()
         assert reason in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
         assert len(app.store.history_entries(blocked_key, blocked)) == 1
@@ -399,6 +418,8 @@ def check():
     assert len(app.store.history_entries(MEDIA_ID, media_plan())) == 1
     app.media_history()
     media_window = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '外部メディア検査の履歴')
+    settle_history(media_window.history_controller)
+    assert len(media_window.history_controller.entries) == 1
     media_window.destroy()
     with patch.object(app, 'send_notification') as notifications:
         app.flush_automatic_notice(watch_key)
@@ -592,6 +613,7 @@ def check():
                 assert backend.executed == 1
                 assert not backend.installed
                 setup.close()
+                Path(__import__('os').environ['SMOKE_RESULT']).write_text('ok')
                 app.quit()
                 return False
             return True
@@ -606,4 +628,5 @@ raise SystemExit(app.run())
                     '--renderer=pixman', '--no-config', '--socket=clam-test',
                     '--log=' + str(Path(root) / 'weston.log'), '--',
                     '/usr/bin/python3', '-c', code], env=env, check=True, timeout=20)
+    assert Path(env['SMOKE_RESULT']).read_text() == 'ok'
     print('GUI startup and history: OK (isolated Wayland)')

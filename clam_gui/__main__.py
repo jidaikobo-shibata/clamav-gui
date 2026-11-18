@@ -688,6 +688,8 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         window.present()
 
     def do_shutdown(self):
+        if getattr(self, 'history_controller', None):
+            self.history_controller.close()
         if getattr(self, 'automation_timer', None):
             GLib.source_remove(self.automation_timer)
         if getattr(self, 'observers', None):

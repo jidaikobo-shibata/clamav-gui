@@ -13,6 +13,9 @@ class NotificationOutbox:
         self.thread = None
         self.guard = threading.Lock()
         self.retry_after = 0
+        self.next_poll = 0
+        self.state_at = float('-inf')
+        self.state_value = None
         with store.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS notification_outbox '
                        '(id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, '
@@ -24,6 +27,8 @@ class NotificationOutbox:
                     db.execute(f'ALTER TABLE notification_outbox ADD COLUMN {column} {definition}')
 
     def enqueue(self, title, body, urgency='normal'):
+        self.next_poll = 0
+        self.state_at = float('-inf')
         urgency = 'critical' if urgency == 'critical' else 'normal'
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -41,6 +46,13 @@ class NotificationOutbox:
         with self.store.connect() as db:
             count = db.execute('SELECT COALESCE(sum(count),0) FROM notification_outbox').fetchone()[0]
         return dict(pending=count, error=self.store.preferences.get('notification-error', ''))
+
+    def cached_state(self):
+        now = time.monotonic()
+        if now - self.state_at >= 1:
+            self.state_value = self.state()
+            self.state_at = now
+        return self.state_value
 
     def deliver_one(self):
         claim = uuid.uuid4().hex
@@ -81,6 +93,9 @@ class NotificationOutbox:
         with self.guard:
             if self.stop.is_set() or (self.thread and self.thread.is_alive()) or time.monotonic() < self.retry_after:
                 return
+            if time.monotonic() < self.next_poll:
+                return
+            self.next_poll = time.monotonic() + 1
             with self.store.connect() as db:
                 ready = db.execute('SELECT 1 FROM notification_outbox WHERE due<=? AND (claim IS NULL OR lease_until<=?) LIMIT 1', (self.clock(),self.clock())).fetchone()
             if not ready:

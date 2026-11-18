@@ -1,6 +1,7 @@
 """GTK-main-thread directory and mounted removable-media observers. No mounting."""
 from collections import deque
 import os
+import time
 from pathlib import Path
 import uuid
 from gi.repository import Gio, GLib
@@ -35,6 +36,7 @@ class Observers:
         self.tasks = deque()
         self.queued = set()
         self.idle = None
+        self.current = None
         self.mounts = {}
         self.volumes = volumes if volumes is not None else Gio.VolumeMonitor.get()
         self.signals = [self.volumes.connect('mount-added', self.mount_added),
@@ -50,6 +52,7 @@ class Observers:
         for monitor in self.monitors.values():
             monitor.cancel()
         self.monitors.clear()
+        self.finish_directory()
         self.tasks.clear()
         self.queued.clear()
         self.plans = plans
@@ -65,8 +68,50 @@ class Observers:
         if self.idle is None:
             self.idle = GLib.idle_add(self.drain)
 
+    @property
+    def discovering(self):
+        return bool(self.current or self.tasks)
+
+    def finish_directory(self):
+        if self.current:
+            key, directory, _, entries, _ = self.current
+            entries.close()
+            self.queued.discard((key, directory))
+            self.current = None
+
     def drain(self):
-        for _ in range(8):
+        # Both bounds matter: slow filesystems and very large directories yield.
+        deadline = time.monotonic() + 0.008
+        for _ in range(128):
+            if self.current:
+                key, directory, scan_files, entries, count = self.current
+                plan = self.plans.get(key)
+                if not plan or (_ == 0 and not allowed_path(plan, directory)):
+                    self.finish_directory()
+                    continue
+                try:
+                    entry = next(entries)
+                    if count >= 10000:
+                        self.engine.warn(key, plan, 'フォルダー内の項目数が監視準備の上限を超えました。範囲を狭めて全体検査を併用してください。')
+                        self.finish_directory()
+                    else:
+                        self.current = key, directory, scan_files, entries, count + 1
+                        if not entry.is_symlink():
+                            if entry.is_dir(follow_symlinks=False) and plan.watch_recursive:
+                                self.enqueue(key, entry.path, scan_files)
+                            elif entry.is_file(follow_symlinks=False) and allowed_path(plan, entry.path):
+                                if self.inventory:
+                                    self.inventory(key, entry.path)
+                                if scan_files:
+                                    self.engine.file_event(key, entry.path)
+                except StopIteration:
+                    self.finish_directory()
+                except OSError as error:
+                    self.engine.warn(key, plan, '監視フォルダーを読み取れません：' + str(error))
+                    self.finish_directory()
+                if time.monotonic() >= deadline:
+                    return True
+                continue
             if not self.tasks:
                 self.idle = None
                 return False
@@ -93,22 +138,12 @@ class Observers:
                     self.engine.warn(key, plan, 'フォルダーを監視できません：' + str(error))
                     continue
             try:
-                with os.scandir(directory) as entries:
-                    for index, entry in enumerate(entries):
-                        if index >= 10000:
-                            self.engine.warn(key, plan, 'フォルダー内の項目数が監視準備の上限を超えました。範囲を狭めて全体検査を併用してください。')
-                            break
-                        if entry.is_symlink():
-                            continue
-                        if entry.is_dir(follow_symlinks=False) and plan.watch_recursive:
-                            self.enqueue(key, entry.path, scan_files)
-                        elif entry.is_file(follow_symlinks=False) and allowed_path(plan, entry.path):
-                            if self.inventory:
-                                self.inventory(key, entry.path)
-                            if scan_files:
-                                self.engine.file_event(key, entry.path)
+                self.current = key, directory, scan_files, os.scandir(directory), 0
+                self.queued.add((key, directory))
             except OSError as error:
                 self.engine.warn(key, plan, '監視フォルダーを読み取れません：' + str(error))
+            if time.monotonic() >= deadline:
+                return True
         return True
 
     def event(self, monitor, file, other, event, key):
@@ -176,6 +211,7 @@ class Observers:
         return count
 
     def close(self):
+        self.finish_directory()
         if self.idle is not None:
             GLib.source_remove(self.idle)
             self.idle = None
