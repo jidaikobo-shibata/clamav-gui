@@ -1,4 +1,4 @@
-import fcntl
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -39,7 +39,7 @@ class ScannerTests(CoreTestCase):
             cancel = threading.Event()
             cancel.set()
             with patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), \
-                 patch('clam_gui.core.subprocess.Popen') as popen:
+                 patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as popen:
                 process = popen.return_value
                 process.wait.side_effect = [subprocess.TimeoutExpired('scan', .2), -15]
                 status, _ = scan(root, store, cancel, Path(root)/'lock')
@@ -50,10 +50,12 @@ class ScannerTests(CoreTestCase):
                 self.assertIn('中止', status)
                 self.assertEqual(store.recent()[0][2], status)
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux flock integration')
     def test_lock_prevents_scanner_start(self):
+        import fcntl
         with tempfile.TemporaryDirectory() as root:
             path = Path(root)/'lock'
-            with path.open('a') as lock, patch('clam_gui.core.subprocess.Popen') as run, \
+            with path.open('a') as lock, patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as run, \
                  patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'):
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 with self.assertRaisesRegex(ValueError, '別の検査'):
@@ -61,7 +63,7 @@ class ScannerTests(CoreTestCase):
                 run.assert_not_called()
 
     def test_missing_target_does_not_run(self):
-        with tempfile.TemporaryDirectory() as root, patch('clam_gui.core.subprocess.Popen') as run:
+        with tempfile.TemporaryDirectory() as root, patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as run:
             with self.assertRaises(ValueError):
                 scan(root + '/missing', Store(root))
             run.assert_not_called()
@@ -92,7 +94,7 @@ class ProfileTests(CoreTestCase):
         from clam_gui.core import Plan
         with tempfile.TemporaryDirectory() as root:
             with patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), \
-                 patch('clam_gui.core.subprocess.Popen') as popen:
+                 patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as popen:
                 popen.return_value.wait.return_value = 0
                 scan(Plan('試験', [root], [root+'/a.txt'], True, [root+'/cache']),
                      Store(root), lock_path=Path(root)/'lock')
@@ -175,7 +177,7 @@ class SingleFolderTests(CoreTestCase):
                 with self.subTest(targets=targets):
                     with self.assertRaises(ValueError):
                         store.save_profile(plan)
-                    with patch('clam_gui.core.subprocess.Popen') as process:
+                    with patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as process:
                         with self.assertRaises(ValueError):
                             scan(plan, store, lock_path=Path(root)/'lock')
                         process.assert_not_called()
@@ -219,7 +221,7 @@ class PhishingPreferenceTests(CoreTestCase):
             for enabled in (False, True):
                 store.set_phishing(enabled)
                 with patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), \
-                     patch('clam_gui.core.subprocess.Popen') as popen:
+                     patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as popen:
                     popen.return_value.wait.return_value = 0
                     scan(Plan('test', [root], [], not enabled), store, lock_path=Path(root)/'lock')
                     args = popen.call_args.args[0]
@@ -237,7 +239,7 @@ class ScannerLimitTests(CoreTestCase):
             store.set_scan_preferences(store.scan_options(), {'max-filesize': 256, 'max-scansize': 512})
             with patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), \
                  patch('clam_gui.core.supported_options', return_value=set(DEFAULTS) | set(LIMITS)), \
-                 patch('clam_gui.core.subprocess.Popen') as process:
+                 patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as process:
                 process.return_value.wait.return_value = 0
                 _, output = scan(Plan('test', [root], []), store, lock_path=Path(root)/'lock')
                 args = process.call_args.args[0]

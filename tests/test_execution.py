@@ -54,11 +54,11 @@ class ExecutionTests(unittest.TestCase):
             self.keys[name]=self.store.save_profile(Plan(name,[str(target)],[]))
             save_schedule(self.store,self.keys[name],Schedule(enabled=True))
         scanner=self.root/'scanner'
-        scanner.write_text('#!'+sys.executable+'\n'+'''import sys, time
+        scanner.write_text('#!'+sys.executable+'\n'+'''import os, sys, time
 from pathlib import Path
 root=Path(__file__).parent
 path=Path(sys.argv[-1]);tag=path.parent.name if path.is_file() else path.name
-(root/'started'/tag).write_text('started')
+(root/'started'/tag).write_text(str(os.getpid()))
 deadline=time.monotonic()+10
 while not (root/'release'/tag).exists() and time.monotonic()<deadline:time.sleep(.01)
 print('Scanned files: 1\\nInfected files: 0\\nTotal errors: 0')
@@ -92,6 +92,40 @@ print('Scanned files: 1\\nInfected files: 0\\nTotal errors: 0')
         output,error=child.communicate(timeout=4)
         self.assertEqual(child.returncode,0,error)
         return output
+
+    def test_scanner_is_killed_when_runner_dies_and_next_scan_can_start(self):
+        from clam_gui.runtime import process_identity
+        first=self.start('a');self.wait(lambda:self.started('a'))
+        scanner_pid=int((self.root/'started/a').read_text());identity=process_identity(scanner_pid)
+        self.assertTrue(identity)
+        first.kill();first.communicate(timeout=3)
+        self.wait(lambda:process_identity(scanner_pid)!=identity)
+        second=self.start('b');self.wait(lambda:self.started('b'))
+        self.assertNotEqual(process_identity(scanner_pid),identity)
+        self.release('b');self.result(second)
+
+    def test_inherited_lock_lasts_until_scanner_exits(self):
+        from clam_gui.platforms import get_backend
+        backend=get_backend();path=self.root/'owned.lock'
+        first=backend.lock(path);second=backend.lock(path)
+        self.addCleanup(first.close);self.addCleanup(second.close)
+        self.assertTrue(first.acquire())
+        child=backend.spawn_scanner([str(self.root/'scanner'),str(self.root/'targets/a')],lock=first,
+                                    stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+        self.children.append(child);self.wait(lambda:self.started('a'))
+        first.close();self.assertFalse(second.acquire())
+        self.release('a');child.communicate(timeout=3)
+        self.assertEqual(child.returncode,0);self.assertTrue(second.acquire())
+
+    def test_guard_refuses_to_execute_if_parent_already_disappeared(self):
+        from clam_gui.platforms import get_backend
+        import clam_gui.platforms.scanner_guard as guard
+        lock=get_backend().lock(self.root/'guard.lock');self.addCleanup(lock.close);lock.acquire()
+        child=subprocess.run([sys.executable,guard.__file__,'--parent',str(os.getpid()+10000000),
+                              '--lock-fd',str(lock.file.fileno()),'--',str(self.root/'scanner'),str(self.root/'targets/a')],
+                             pass_fds=(lock.file.fileno(),),capture_output=True,timeout=3)
+        self.assertEqual(child.returncode,125)
+        self.assertFalse(self.started('a'))
 
     def test_full_scans_are_serial_but_event_scan_runs_in_parallel(self):
         first=self.start('a');self.wait(lambda:self.started('a'))

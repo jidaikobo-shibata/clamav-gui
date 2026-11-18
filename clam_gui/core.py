@@ -381,7 +381,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             # A temporary file avoids pipe deadlocks and unbounded in-memory output.
             with tempfile.TemporaryFile() as log:
                 try:
-                    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                    process = get_backend().spawn_scanner(command, lock=lock, stdout=log, stderr=subprocess.STDOUT,
                                                env={**os.environ, 'LC_ALL': 'C'})
                     cancelled = False
                     removed = False

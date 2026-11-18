@@ -63,7 +63,7 @@ class MailboxTests(unittest.TestCase):
                 return process
             with patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), \
                  patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)), \
-                 patch('clam_gui.core.subprocess.Popen', side_effect=fake_scan):
+                 patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner', side_effect=fake_scan):
                 status, output = scan(Plan('test', [root], []), store, lock_path=Path(root)/'lock')
             self.assertIn(MAILBOX_NOTE, status)
             self.assertIn('保存ファイル：1件', status)

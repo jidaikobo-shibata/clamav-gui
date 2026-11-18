@@ -15,7 +15,7 @@ class UnsupportedBackend:
 
     scheduler = packages = updater = auto_update = background = lock = notify = unavailable
     observers = install_stop_handlers = can_update = unavailable
-    definition_label = definition_status = unavailable
+    definition_label = definition_status = spawn_scanner = unavailable
 
     def process_identity(self, pid):
         return None  # Unknown, never pretend that a process is stopped or safe to signal.

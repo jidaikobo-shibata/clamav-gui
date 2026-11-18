@@ -23,10 +23,14 @@ class PreferencesWindow:
             xalign=0, wrap=True))
         def refresh():
             active = background_enabled(self.store)
-            connected = bool(heartbeat(self.store))
+            snapshot = heartbeat(self.store)
+            connected = bool(snapshot)
             state.set_text('常駐監視：' + ('稼働中（ログイン中）' if connected and active else
                 '有効・接続できません。再起動するかシステムのユーザーサービスを確認してください。' if active else
                 '無効（画面を開いている間だけ監視します）'))
+            delivery = snapshot.get('notifications', {})
+            if delivery.get('pending'):
+                state.set_text(state.get_text() + f"\n通知待ち：{delivery['pending']}件" + ('（配信失敗のため再試行中）' if delivery.get('error') else ''))
             control.set_label('常駐監視を無効にする…' if active else '常駐監視を有効にする…')
             control.set_sensitive(service.supported() and not self.schedule_busy)
             return True

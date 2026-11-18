@@ -1,20 +1,16 @@
 """Headless GLib monitoring process; no Gtk application or desktop window."""
 from .notifications import AutomaticNotices
+from .notification_outbox import NotificationOutbox
 import json
-import threading
-import subprocess
 import time
 from .platforms import get_backend
-from .automation import Automation, MEDIA_ID, signature
+from .automation import Automation, MEDIA_ID, signature, SIGNATURE_VERSION
 from .background import Lease, enabled, watched_plans, preference, put_preference
 from gi.repository import GLib
 
 
 def notify(title, body, urgency='normal'):
-    try:
-        get_backend().notify(title, body, urgency)
-    except (OSError, RuntimeError, subprocess.TimeoutExpired):
-        print('通知を表示できませんでした。検査履歴を確認してください。', flush=True)
+    get_backend().notify(title, body, urgency)
 
 
 class Checkpoints:
@@ -30,7 +26,7 @@ class Checkpoints:
             db.execute('CREATE TABLE IF NOT EXISTS monitor_files (id TEXT NOT NULL, path TEXT NOT NULL, stamp TEXT NOT NULL, PRIMARY KEY(id,path))')
 
     def configure(self, plans):
-        configs = {key: json.dumps(dict(targets=plan.targets, excludes=plan.excludes, excluded_dirs=plan.excluded_dirs, recursive=plan.watch_recursive), sort_keys=True) for key, plan in plans}
+        configs = {key: json.dumps(dict(signature_version=SIGNATURE_VERSION, targets=plan.targets, excludes=plan.excludes, excluded_dirs=plan.excluded_dirs, recursive=plan.watch_recursive), sort_keys=True) for key, plan in plans}
         if configs == self.roots:
             return
         self.flush()
@@ -102,18 +98,8 @@ class Checkpoints:
 class Monitor:
     def __init__(self, store, observers=None, notifier=notify):
         self.store = store
-        self.notification_slots = threading.BoundedSemaphore(4)
-        def asynchronous_notify(*args):
-            if not self.notification_slots.acquire(blocking=False):
-                print('通知が混み合っています。検査履歴を確認してください。', flush=True)
-                return
-            def send():
-                try:
-                    notifier(*args)
-                finally:
-                    self.notification_slots.release()
-            threading.Thread(target=send, daemon=False).start()
-        self.notifier = asynchronous_notify
+        self.outbox = NotificationOutbox(store, notifier)
+        self.notifier = self.outbox.enqueue
         self.loop = GLib.MainLoop()
         self.lease = Lease(store)
         self.revision = time.time()
@@ -178,11 +164,12 @@ class Monitor:
                 put_preference(self.store, 'background-command-result', dict(token=self.command, count=count))
         self.engine.tick()
         self.flush()
+        self.outbox.pump()
         statuses = {key: self.engine.status(key) for key in self.engine.plans}
         statuses[MEDIA_ID] = self.engine.status(MEDIA_ID)
         if not __import__('shutil').which('clamscan'):
             statuses = {key: 'ClamAV未導入：検査待ちを保持しています' for key in statuses}
-        put_preference(self.store, 'background-state', dict(updated=time.time(), generation=self.generation, revision=self.revision, statuses=statuses, active=self.engine.active_key))
+        put_preference(self.store, 'background-state', dict(updated=time.time(), generation=self.generation, revision=self.revision, statuses=statuses, active=self.engine.active_key, notifications=self.outbox.state()))
         return True
 
     def checked_tick(self):
@@ -219,6 +206,7 @@ class Monitor:
         finally:
             self.stop()
             self.flush(True)
+            self.outbox.close()
             self.lease.close()
             if preference(self.store, 'background-state', {}).get('generation') == self.generation:
                 put_preference(self.store, 'background-state', {})

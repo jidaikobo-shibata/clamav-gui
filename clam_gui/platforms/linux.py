@@ -1,6 +1,8 @@
 """Linux implementations behind the common backend entry point."""
 from pathlib import Path
 import subprocess
+import os
+import sys
 
 
 class FileLock:
@@ -69,6 +71,15 @@ class LinuxBackend:
 
     def lock(self, path):
         return FileLock(path)
+
+    def spawn_scanner(self, command, *, lock, **kwargs):
+        if not lock.file:
+            raise RuntimeError('検査の実行ロックを取得していません。')
+        descriptor = lock.file.fileno()
+        helper = Path(__file__).with_name('scanner_guard.py')
+        args = [sys.executable, str(helper), '--parent', str(os.getpid()),
+                '--lock-fd', str(descriptor), '--', *command]
+        return subprocess.Popen(args, pass_fds=(descriptor,), **kwargs)
 
     def process_identity(self, pid):
         try:

@@ -35,6 +35,7 @@ Windows/macOSの担当者は、対応する実装と選択処理を追加して�
 | `background(store)` | `path` / `supported()` / `apply(enable)` を持つ常駐起動管理 |
 | `observers(engine)` | ファイル・メディアのイベント取得。既存のconfigure/close等の意味を維持 |
 | `lock(path)` | `acquire()` が即時にboolを返すプロセス間ロック、`close()` で解放。`file` は取得中かの確認に利用 |
+| `spawn_scanner(command, lock=..., **kwargs)` | 親終了時に検査を停止し、終了まではロックを保持する子プロセス起動。wait/terminate/killを持つプロセスを返す |
 | `process_identity(pid)` | 生存個体の識別子、死亡確認済みなら空文字、確認不能ならNone |
 | `notify(title, body, urgency)` | ウィンドウを持たない処理からの通知配送。失敗時は例外 |
 | `definition_label()` / `definition_status()` | 各OSの定義保存先に対応する日時・鮮度の表示 |
@@ -97,3 +98,13 @@ GUIの操作は分離Wayland、常駐は一時データと模擬検査の独立�
 
 `tests/test_execution.py` では一時データと模擬スキャナーを別プロセスで動かし、
 2枠の並行性、同じ枠の順番、重複・取消・予定無効化、上限、旧記録互換を確認します。
+
+## 検査プロセス・変更検知・通知の契約
+
+- Linuxの検査起動は専用のexecヘルパーを使います。ヘルパーも配布対象に含めます。別スレッドのあるGUIでpreexec_fnを使わず、設定に失敗した場合は未保護の検査を開始しません。通常ユーザーの権限で動作します。
+- 他OSのspawn_scanner実装も、所有者終了時の子停止と、子終了までの実行枠保持を保証してください。Linuxヘルパーを他OSで呼びません。
+- 変更イベントは検査済みキャッシュを無効化します。再開比較の形式を更新した際は比較元を作り直します。各OSで更新日時以外の変更指標も確認してください。検査中に届いた再変更は次の検査へ残します。
+- notification_outboxは常駐側の配送を担当します。notifyアダプターはOS APIへの受け渡し失敗を例外で報告してください。失敗を握り潰すと配信済みと誤認します。
+- 配送は1ワーカー、個別256件＋2種類の件数要約で保存量を抑えます。配信claimの期限は60秒で、異常終了した配送を引き継げます。受理後の記録確定前に異常終了した場合は再表示を許容します。
+- 再試行は5秒から最大300秒です。GUIのGio.Notificationと定期検査CLIの通知配送は従来の経路を維持します。
+- 子プロセス保護の参考：[Linuxの親終了シグナル](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html)、[Pythonのsubprocess](https://docs.python.org/3/library/subprocess.html)。

@@ -12,6 +12,7 @@ import time
 
 MEDIA_ID = 'external-media'
 TEMP_SUFFIXES = ('.part', '.crdownload', '.download', '.tmp')
+SIGNATURE_VERSION = 2
 
 
 def media_plan():
@@ -22,7 +23,7 @@ def media_plan():
 def signature(path):
     try:
         info = Path(path).lstat()
-        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) if stat.S_ISREG(info.st_mode) else None
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) if stat.S_ISREG(info.st_mode) else None
     except OSError:
         return None
 
@@ -70,12 +71,14 @@ class WatchQueue:
         self.pending = {}
         self.completed = {}
 
-    def put(self, key, plan, path):
+    def put(self, key, plan, path, *, changed=False):
         path = str(Path(os.path.abspath(path)))
         stamp = signature(path)
         if not stamp or path.lower().endswith(TEMP_SUFFIXES) or not allowed_file(plan, path):
             return True
         ident = key, path
+        if changed:
+            self.completed.pop(ident, None)
         if self.completed.get(ident) == stamp:
             return True
         if ident not in self.pending and len(self.pending) >= self.limit:
@@ -165,7 +168,7 @@ class Automation:
 
     def file_event(self, key, path):
         plan = self.plans.get(key)
-        if plan and not self.queue.put(key, plan, path):
+        if plan and not self.queue.put(key, plan, path, changed=True):
             self.warn(key, plan, '検査待ちが1000件を超えました。取りこぼし分はフォルダー全体を検査してください。')
 
     def add_media(self, medium, force=False):
@@ -254,7 +257,7 @@ class Automation:
                 elif not retry:
                     if assess(status, output).completed:
                         for item in batch:
-                            if signature(item.path) == item.signature:
+                            if signature(item.path) == item.signature and (key, item.path) not in self.queue.pending:
                                 self.queue.completed[key, item.path] = item.signature
                         # Bound deduplication memory independently of the event queue.
                         while len(self.queue.completed) > 5000:

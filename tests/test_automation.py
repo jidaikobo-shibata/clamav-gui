@@ -171,7 +171,7 @@ class AutomationTests(unittest.TestCase):
             self.assertIn('--follow-file-symlinks=0',command)
             kwargs['stdout'].write(b'Scanned files: 1\nInfected files: 0\n')
             return Mock(wait=Mock(return_value=0))
-        with patch('clam_gui.core.shutil.which',return_value='/mock/clamscan'),patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)),patch('clam_gui.core.subprocess.Popen',side_effect=spawn):
+        with patch('clam_gui.core.shutil.which',return_value='/mock/clamscan'),patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)),patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner',side_effect=spawn):
             status,output=scan(self.plan,self.store,lock_path=self.root/'lock',profile_id='watch',files=[str(path)])
         self.assertTrue(status.startswith('検査完了'))
         self.assertIn(str(path),output)
@@ -189,7 +189,7 @@ class AutomationTests(unittest.TestCase):
                     raise subprocess.TimeoutExpired(command,.2)
                 return -15
             return Mock(wait=wait)
-        with patch('clam_gui.core.shutil.which',return_value='/mock/clamscan'),patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)),patch('clam_gui.core.subprocess.Popen',side_effect=spawn):
+        with patch('clam_gui.core.shutil.which',return_value='/mock/clamscan'),patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)),patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner',side_effect=spawn):
             status,_=scan(replace(self.plan,kind='media'),self.store,lock_path=self.root/'lock',profile_id=MEDIA_ID,available=lambda:alive[0])
         self.assertIn('取り外されました',status)
         self.assertEqual(len(self.store.history_entries(MEDIA_ID,media_plan())),1)
