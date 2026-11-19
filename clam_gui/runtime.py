@@ -34,7 +34,8 @@ class Activity:
         try:
             elapsed = max(0, int(((now or datetime.datetime.now().astimezone()) -
                                  datetime.datetime.fromisoformat(self.started)).total_seconds()))
-            duration = f'{elapsed // 60}分' if elapsed >= 60 else f'{elapsed}秒'
+            minutes, seconds = divmod(elapsed, 60)
+            duration = f'{minutes}分{seconds:02d}秒' if minutes else f'{seconds}秒'
             return '検査中・開始から' + duration
         except (ValueError, TypeError):
             return '検査中'

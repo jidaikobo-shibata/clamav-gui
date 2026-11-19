@@ -56,10 +56,13 @@ class RuntimeTests(unittest.TestCase):
             started = '2026-11-17T10:00:00+09:00'
             with track_scan(store, 'plan', started):
                 state = activities(store)[0]
-                now = datetime.datetime.fromisoformat('2026-11-17T10:12:30+09:00')
-                self.assertEqual(state.describe(now), '検査中・開始から12分')
+                start = datetime.datetime.fromisoformat(started)
+                for seconds, expected in ((59, '59秒'), (60, '1分00秒'), (61, '1分01秒'), (750, '12分30秒')):
+                    with self.subTest(seconds=seconds):
+                        now = start + datetime.timedelta(seconds=seconds)
+                        self.assertEqual(state.describe(now), '検査中・開始から' + expected)
                 request_stop(store, state.token)
-                self.assertEqual(activities(store)[0].describe(now), '検査を中止しています…')
+                self.assertEqual(activities(store)[0].describe(), '検査を中止しています…')
 
     def test_unassociated_scan_does_not_create_state(self):
         with tempfile.TemporaryDirectory() as directory:
