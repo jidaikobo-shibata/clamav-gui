@@ -29,6 +29,13 @@ def main():
         return 2
     if plan.kind != 'scheduled' or not read_schedule(store, args.profile).enabled:
         return 0
+    schedule = read_schedule(store, args.profile)
+    interval = sys.platform == 'win32' and schedule.frequency == 'interval'
+    clock_key = 'last-scheduled-completion-' + args.profile
+    if interval:
+        import time
+        if time.time() - store.preferences.get(clock_key, 0) < 60 * schedule.interval_minutes:
+            return 0
     cancel = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: cancel.set())
@@ -44,10 +51,12 @@ def main():
     except Exception as error:
         status, output = record_scan_failure(store, plan, error, args.profile,
                                              started.isoformat(timespec='seconds'))
+    if interval:
+        store.preferences.set(clock_key, time.time())
     if getattr(status, 'started_at', None):
         started = datetime.datetime.fromisoformat(status.started_at)
     finished = datetime.datetime.now().astimezone()
-    title, body, urgency = scan_notification(plan.label, status, output, started, finished, definition_status())
+    title, body, urgency = scan_notification(plan.label, status, output, started, finished, get_backend().definition_status() if sys.platform == "win32" else definition_status())
     print(status)
     try:
         get_backend().notify(title, body, urgency)

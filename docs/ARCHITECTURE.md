@@ -1,7 +1,7 @@
 # コードの責務とOS移植の入口
 
 2026-11-18のリファクタリング後の構成です。画面の操作、保存先、プランID、
-サービス名は維持しています。OS連携の実装があるのはUbuntu/Linuxだけです。
+サービス名は維持しています。Ubuntu/Linuxに加え、Windows 11 x64の実装を追加しました。
 
 ## 画面とアプリケーション
 
@@ -22,7 +22,7 @@
 `clam_gui/platforms.get_backend()` がOS連携の入口です。
 GUIは `self.backend` を使い、個別のOSサービスを直接構築しません。
 LinuxBackendは既存のAPT・FreshClam・systemd管理を呼び出します。
-Windows/macOSの担当者は、対応する実装と選択処理を追加してください。
+WindowsBackendはwinget、FreshClam、タスクスケジューラ、Job Object、GIOのフォルダー監視とリムーバブルドライブ列挙を利用します。実装は `clam_gui/platforms/windows*.py` にあります。macOS向けの選択処理は未実装です。
 未実装のOSは明示的なエラーを返し、Linuxの管理コマンドへフォールバックしません。
 
 | メソッド | 戻り値・役割 |

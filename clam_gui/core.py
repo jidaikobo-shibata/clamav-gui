@@ -9,7 +9,7 @@ import tempfile
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-import shutil
+from .engine import executable
 import sqlite3
 import subprocess
 from .retention import DEFAULTS as AUTOMATION_DEFAULTS, validate as validate_automation, prune, initialize as initialize_retention
@@ -23,12 +23,12 @@ from .options import DEFAULTS, supported_options, option_arguments, describe_opt
 
 
 def engine_status():
-    binary = shutil.which('clamscan')
+    binary = executable()
     if not binary:
         return 'ClamAVが見つかりません。OS側への導入が必要です。'
     try:
         result = subprocess.run([binary, '--version'], capture_output=True,
-                                text=True, timeout=10)
+                                text=True, timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         return (result.stdout.strip() if result.returncode == 0 else
                 'ClamAVの確認に失敗しました。')
     except (OSError, subprocess.TimeoutExpired):
@@ -38,7 +38,7 @@ def engine_status():
 class Store:
     def __init__(self, directory=None):
         base = Path(directory) if directory else Path(
-            os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))
+            os.environ.get('XDG_DATA_HOME') or (os.environ['LOCALAPPDATA'] if os.name == 'nt' else Path.home() / '.local/share')
         ) / 'clamav-gui'
         base.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = base / 'history.sqlite3'
@@ -357,6 +357,15 @@ def record_scan_failure(store, plan, error, profile_id=None, started=None):
     return status, output
 
 
+def _exclude_pattern(path):
+    if os.name == 'nt':
+        # clamscan matches directories as supplied and files by long path.
+        spellings = dict.fromkeys((Path(path).as_posix(), Path(path).resolve().as_posix()))
+        patterns = [r'[/\\]'.join(re.escape(part) for part in name.split('/')) for name in spellings]
+        return '(' + '|'.join(patterns) + ')'
+    return re.escape(os.path.normpath(str(path)))
+
+
 def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None, available=None, wait=False, can_start=None):
     plan = target if isinstance(target, Plan) else Plan('フォルダー検査', [Path(target).absolute()], [])
     plan = store.effective_plan(plan)
@@ -370,7 +379,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
         from .automation import allowed_file
         if not files or len(files) > 50 or any(not allowed_file(plan, path) for path in files):
             raise ValueError('監視対象のファイルが消失・変更されたか、検査範囲外です。')
-    binary = shutil.which('clamscan')
+    binary = executable()
     if not binary:
         raise ValueError('ClamAVが見つかりません。')
     started = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
@@ -410,11 +419,14 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                        '--follow-file-symlinks=0', '--follow-dir-symlinks=0',
                        '--heuristic-alerts=yes', '--alert-exceeds-max=yes',
                        '--fail-if-cvd-older-than=3']
+            if os.name == 'nt':
+                from .engine import database
+                command.append('--database=' + str(database()))
             if plan.kind == 'media':
                 command.append('--cross-fs=no')
             command += arguments
-            command += ['--exclude=^' + re.escape(str(p)) + '$' for p in plan.excludes]
-            command += ['--exclude-dir=^' + re.escape(os.path.normpath(str(p))) + r'(/|$)'
+            command += ['--exclude=^' + _exclude_pattern(p) + '$' for p in plan.excludes]
+            command += ['--exclude-dir=^' + _exclude_pattern(p) + (r'([/\\]|$)' if os.name == 'nt' else r'(/|$)')
                         for p in plan.excluded_dirs]
             command += ['--'] + [str(p) for p in (files if files is not None else plan.targets)]
             # A temporary file avoids pipe deadlocks and unbounded in-memory output.

@@ -23,6 +23,9 @@ class UnsupportedBackend:
 
 def get_backend(system=None):
     system = sys.platform if system is None else system
+    if system == 'win32':
+        from .windows import WindowsBackend
+        return WindowsBackend()
     if system.startswith('linux'):
         from .linux import LinuxBackend
         return LinuxBackend()

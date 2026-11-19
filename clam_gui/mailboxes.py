@@ -12,11 +12,14 @@ WARNING_PREFIXES = ('Heuristics.Limits.Exceeded.', 'Heuristics.Encrypted.',
 
 
 def is_mbox(path):
-    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, 'O_NOFOLLOW', 0)
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, 'O_NOFOLLOW', 0)
     try:
-        descriptor = os.open(path, flags)
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or getattr(before, 'st_file_attributes', 0) & 0x400:
+            return False
+        descriptor = os.open(path, flags | getattr(os, 'O_BINARY', 0))
         with os.fdopen(descriptor, 'rb') as file:
-            if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+            if not os.path.samestat(before, os.fstat(file.fileno())):
                 return False
             data = file.read(65536)
     except (OSError, ValueError):

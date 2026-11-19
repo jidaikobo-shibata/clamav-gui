@@ -86,6 +86,7 @@ with track_scan(Store(sys.argv[1]), 'plan', '2026-11-17T10:00:00+09:00'):
             self.assertEqual(activities(store), [])
             self.assertFalse(request_stop(store, token))
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "uses a Unix executable script")
     def test_scan_in_separate_process_can_be_seen_and_cancelled(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -103,7 +104,7 @@ from scripts.run_scheduled import main
 root, scanner, key = sys.argv[1:]
 os.environ['HOME'] = root
 sys.argv = ['runner', '--data-dir', root+'/data', '--profile', key]
-with patch('clam_gui.core.shutil.which', return_value=scanner), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|set(LIMITS)), patch('scripts.run_scheduled.subprocess.run', return_value=SimpleNamespace(returncode=0)), patch('scripts.run_scheduled.definition_status', return_value='test definitions'):
+with patch('clam_gui.core.executable', return_value=scanner), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|set(LIMITS)), patch('scripts.run_scheduled.subprocess.run', return_value=SimpleNamespace(returncode=0)), patch('scripts.run_scheduled.definition_status', return_value='test definitions'):
     raise SystemExit(main())
 """
             child = subprocess.Popen([sys.executable, '-c', code, directory, str(scanner), key],

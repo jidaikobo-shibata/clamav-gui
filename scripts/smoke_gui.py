@@ -27,7 +27,7 @@ auto_service = auto_patch.start()
 auto_service.return_value.status.return_value = AutoUpdateState(True, True, True, 24)
 from clam_gui.options import DEFAULTS, LIMITS
 # Keep the GUI test independent of whether the real ClamAV package is installed.
-patch('clam_gui.__main__.shutil.which', return_value='/mock/clamscan').start()
+patch('clam_gui.engine.shutil.which', return_value='/mock/clamscan').start()
 patch('clam_gui.ui.preferences.supported_options', return_value=set(DEFAULTS) | set(LIMITS)).start()
 standard = dict(DEFAULTS, **{'phishing-sigs': True, 'phishing-scan-urls': True, 'alert-encrypted': False})
 patch('clam_gui.ui.preferences.standard_defaults', return_value=standard).start()
@@ -51,7 +51,7 @@ def settle_history(controller=None):
 
 def check():
     assert app.install_prompt_checked and app.install_prompt is None
-    with patch('clam_gui.__main__.shutil.which', return_value=None), patch.object(app, 'package_setup') as setup:
+    with patch('clam_gui.engine.shutil.which', return_value=None), patch.object(app, 'package_setup') as setup:
         app.install_prompt_checked = False
         with patch.object(app.window, 'get_mapped', return_value=False):
             assert app.offer_install() is True

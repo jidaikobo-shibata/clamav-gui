@@ -4,6 +4,7 @@ from .notification_outbox import NotificationOutbox
 import json
 import time
 from .platforms import get_backend
+from .engine import executable
 from .automation import Automation, MEDIA_ID, signature, SIGNATURE_VERSION
 from .background import Lease, watched_plans, preference, put_preference
 from gi.repository import GLib
@@ -180,7 +181,7 @@ class Monitor:
         self.outbox.pump()
         statuses = {key: self.engine.status(key) for key in self.engine.plans}
         statuses[MEDIA_ID] = self.engine.status(MEDIA_ID)
-        if not __import__('shutil').which('clamscan'):
+        if not executable():
             statuses = {key: 'ClamAV未導入：検査待ちを保持しています' for key in statuses}
         # Publish changed state promptly; keep the eight-second lease fresh at
         # three-second intervals without rewriting identical state twice a second.

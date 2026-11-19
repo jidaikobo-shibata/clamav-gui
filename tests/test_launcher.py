@@ -10,7 +10,7 @@ class LauncherTests(unittest.TestCase):
         name, text = render_entry(root)
         self.assertEqual(name, 'com.jidaikobo.ClamAVGui.desktop')
         self.assertIn('Terminal=false', text)
-        self.assertIn('scripts/launch_gui.py', text)
+        self.assertIn(exec_arg(str(root/'scripts/launch_gui.py')), text)
         self.assertNotIn('sh -c', text)
         self.assertNotIn('Autostart', text)
 

@@ -51,6 +51,9 @@ class PackageWindow:
         explanation = ('既存のFreshClam自動更新サービスを利用して、定義ファイルを取得・更新します。'
                        if update_only else 'ClamAVは、このGUI以外のアプリも利用する共通のソフトウェアです。\n'
                        '削除すると、ClamAVを利用する他のアプリの検査も使えなくなります。')
+        windows = self.backend.name == 'win32'
+        if windows and update_only:
+            explanation = 'FreshClamでこのユーザーの定義ファイルを取得・更新します。'
         box.append(Gtk.Label(label=explanation, xalign=0, wrap=True))
         controls = Gtk.Box(spacing=8, homogeneous=True)
         install = Gtk.Button(label='インストール')
@@ -92,7 +95,7 @@ class PackageWindow:
         def close_request(_window):
             if state['updating']:
                 state['cancel'].set()
-                message.set_text('更新を中断し、一時起動したサービスを停止しています…' if state['temporary_update'] else
+                message.set_text('定義更新を中止しています…' if windows else '更新を中断し、一時起動したサービスを停止しています…' if state['temporary_update'] else
                                  '監視を終了しています。更新サービスは停止しません。')
                 return True
             if state['running']:
@@ -106,7 +109,7 @@ class PackageWindow:
             install.set_sensitive(ready and len(state['installed']) < len(manager.package_names))
             remove.set_sensitive(ready and bool(state['installed']))
             update.set_sensitive(ready and self.backend.can_update(state['installed']) and
-                                 bool(state['auto'] and state['auto'].manageable))
+                                 (windows or bool(state['auto'] and state['auto'].manageable)))
             refresh.set_sensitive(ready)
             auto_switch.set_sensitive(ready and bool(state['auto'] and state['auto'].manageable))
         def check_state():
@@ -145,7 +148,7 @@ class PackageWindow:
                     status.set_text(text)
                     if error is None:
                         buttons()
-                        if update_only and 'clamav-freshclam' not in installed:
+                        if update_only and not self.backend.can_update(installed):
                             message.set_text('FreshClamが未導入です。メインメニューの「ClamAVの管理」からインストールしてください。')
                     else:
                         message.set_text('この環境では定義ファイルの更新を開始できません。' if update_only else
@@ -203,9 +206,9 @@ class PackageWindow:
             scroll = Gtk.ScrolledWindow(vexpand=True)
             scroll.set_child(detail)
             area.append(scroll)
-            advanced = Gtk.Expander(label='詳細な処理予定（APTの出力）')
+            advanced = Gtk.Expander(label='詳細な処理予定')
             raw = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
-            raw.update_property([Gtk.AccessibleProperty.LABEL], ['APTの事前確認結果'])
+            raw.update_property([Gtk.AccessibleProperty.LABEL], ['パッケージの事前確認結果'])
             raw.get_buffer().set_text(plan.detail)
             raw_scroll = Gtk.ScrolledWindow(min_content_height=130, max_content_height=180)
             raw_scroll.set_child(raw)
@@ -273,7 +276,7 @@ class PackageWindow:
             detail += '\nこの端末でClamAVを使う他の機能にも影響します。管理者認証が必要な場合があります。'
             dialog = Gtk.MessageDialog(transient_for=window, modal=True, message_type=Gtk.MessageType.QUESTION,
                 buttons=Gtk.ButtonsType.OK_CANCEL, text='自動更新を有効にしますか？' if enabled else '自動更新を無効にしますか？',
-                secondary_text=detail)
+                secondary_text=('ログイン中の毎時更新タスクを登録します。' if enabled else '今後の毎時更新を解除します。') if windows else detail)
             def response(d, answer):
                 d.destroy()
                 if answer != Gtk.ResponseType.OK or self.busy:
@@ -305,11 +308,11 @@ class PackageWindow:
             if self.busy:
                 message.set_text('別の処理が実行中です。完了後に再実行してください。')
                 return
-            temporary = bool(state['auto'] and state['auto'].enabled is False and state['auto'].running is False)
+            temporary = not windows and bool(state['auto'] and state['auto'].enabled is False and state['auto'].running is False)
             dialog = Gtk.MessageDialog(application=self, transient_for=window, modal=True,
                 message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
                 text='定義ファイルを取得・更新しますか？',
-                secondary_text='自動更新サービスを利用して、公式の更新先へ接続します。\n'
+                secondary_text='公式の更新先からユーザー用の定義を取得します。' if windows else '自動更新サービスを利用して、公式の更新先へ接続します。\n'
                     '既存のサービスを使い、別のFreshClamを並行起動しません。\n'
                     '管理者認証が必要な場合があります。取得中の場合はその処理を監視します。' +
                     ('\n自動更新は無効のまま、一時的にサービスを起動します。完了・監視終了・エラー時に停止します。' if temporary else ''))
@@ -320,7 +323,7 @@ class PackageWindow:
                 self.busy = True
                 state['running'] = state['updating'] = True
                 state['temporary_update'] = temporary
-                stop_monitor.set_label('更新を中断' if temporary else '監視を終了')
+                stop_monitor.set_label('更新を中断' if temporary or windows else '監視を終了')
                 state['cancel'].clear()
                 self.set_controls(False)
                 buttons()

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import datetime
 import os
 from pathlib import Path
+from .engine import executable
 import stat
 import threading
 import time
@@ -35,7 +36,8 @@ def allowed_path(plan, path):
     if path != root and root not in path.parents:
         return False
     try:
-        if root.is_symlink() or path.is_symlink():
+        if root.is_symlink() or path.is_symlink() or (os.name == "nt" and any(
+                part.lstat().st_file_attributes & 0x400 for part in (path, *path.parents))):
             return False
         resolved_root, resolved = root.resolve(strict=True), path.resolve(strict=True)
         if resolved != resolved_root and resolved_root not in resolved.parents:
@@ -45,7 +47,7 @@ def allowed_path(plan, path):
             if current.is_symlink():
                 return False
             current = current.parent
-        if str(path) in map(str, plan.excludes):
+        if path in map(Path, plan.excludes):
             return False
         return not any(path == Path(p) or Path(p) in path.parents for p in plan.excluded_dirs)
     except (OSError, ValueError, RuntimeError):
@@ -226,8 +228,7 @@ class Automation:
     def tick(self, blocked=False):
         if self.closed or self.active or blocked or self.clock() < self.next_start:
             return
-        import shutil
-        if not shutil.which('clamscan'):
+        if not executable():
             return  # Retain the bounded queue until the engine becomes available.
         medium = None
         while self.media_pending:
