@@ -78,7 +78,7 @@ class Store:
         finally:
             db.close()
 
-    def save(self, started, target, status, output, profile_id=None):
+    def save(self, started, target, status, output, profile_id=None, *, wait=True, completed_at=None):
         result = assess(status, output)
         encoded = output.encode('utf-8')
         if len(encoded) > 2 * 1024 * 1024:
@@ -87,9 +87,11 @@ class Store:
             output = (marker + encoded[:384*1024].decode('utf-8', errors='ignore') + separator +
                       encoded[-(budget-384*1024):].decode('utf-8', errors='ignore'))
         size = len((target + status + output).encode('utf-8')) + 128
-        policy = self.automation_settings()
-        completed = datetime.datetime.now().astimezone()
+        completed = completed_at or datetime.datetime.now().astimezone()
         with self.connect() as db:
+            if not wait:
+                db.execute('PRAGMA busy_timeout=0')
+            policy = self.automation_settings(db=db)
             cursor = db.execute('INSERT INTO scans (started, target, status, output, profile_id, completed_at, detected, log_bytes, result_kind) '
                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                        (started, target, status, output, profile_id,
@@ -99,9 +101,9 @@ class Store:
                        (cursor.lastrowid, completed.replace(microsecond=0).timestamp(), int(not result.clean), size))
             prune(db, policy)
 
-    def automation_settings(self):
+    def automation_settings(self, db=None):
         values = dict(AUTOMATION_DEFAULTS)
-        values.update(self.preferences.get('automation', {}))
+        values.update(self.preferences.get('automation', {}, db=db))
         validate_automation(values)
         return values
 
@@ -345,14 +347,14 @@ def validate_profile(plan):
 
 
 
-def record_scan_failure(store, plan, error, profile_id=None, started=None):
+def record_scan_failure(store, plan, error, profile_id=None, started=None, *, save=None):
     """Preserve failures that happen before scan() can write its normal result."""
     started = started or datetime.datetime.now().astimezone().isoformat(timespec='seconds')
     reason = str(error).strip() or type(error).__name__
     status = ScanStatus('検査不完了：' + reason, ResultKind.INCOMPLETE)
     output = type(error).__name__ + ': ' + reason
     try:
-        store.save(started, plan.describe(), status, output, profile_id)
+        (save or store.save)(started, plan.describe(), status, output, profile_id)
     except Exception as storage_error:
         detail = str(storage_error).strip() or type(storage_error).__name__
         status += '\n検査履歴も保存できませんでした：' + detail

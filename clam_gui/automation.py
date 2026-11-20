@@ -1,5 +1,6 @@
 """Bounded queues and cooperative jobs for foreground-only automatic scans."""
 from .jobs import execute_scan
+from .history_retry import HistoryRetry
 from .execution import ScanAlreadyQueued
 from .results import assess, ScanStatus, ResultKind
 from dataclasses import dataclass
@@ -157,6 +158,7 @@ class Automation:
     def __init__(self, store, dispatch, finished, changed=lambda: None, clock=time.monotonic, scanner=None):
         self.store, self.dispatch, self.finished, self.changed = store, dispatch, finished, changed
         self.clock = clock
+        self.history = HistoryRetry(store, clock=clock, changed=changed)
         self.scanner = scanner
         self.queue = WatchQueue(clock)
         self.plans = {}
@@ -174,6 +176,7 @@ class Automation:
         self.closed = False
 
     def configure(self, plans, media_enabled):
+        self.history.drain()
         self.plans = dict(plans)
         self.media_enabled = media_enabled
         self.queue.retain(self.plans)
@@ -188,10 +191,9 @@ class Automation:
             now = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
             status = ScanStatus('検査不完了：' + message, ResultKind.INCOMPLETE)
             try:
-                self.store.save(now, plan.describe(), status, message, key)
+                self.history.save(now, plan.describe(), status, message, key)
             except Exception as error:
                 detail = '\n履歴も保存できませんでした：' + str(error)
-                self.errors[key] += detail
                 status += detail
             self.changed()
             self.finished(key, status, message, plan.label)
@@ -234,11 +236,16 @@ class Automation:
             from .core import record_scan_failure
             plan = replace(media_plan(), label='外部メディア検査：' + medium.label, targets=[medium.path])
             reason = reason or '検査待ちのメディアが取り外されたため、検査を開始できませんでした。'
-            status, output = record_scan_failure(self.store, plan, ValueError(reason), MEDIA_ID)
+            status, output = record_scan_failure(self.store, plan, ValueError(reason), MEDIA_ID, save=self.history.save)
             self.finished(MEDIA_ID, status, output, plan.label)
         # The active job keeps its Medium object and detects its removal itself.
 
     def status(self, key):
+        status = self._status(key)
+        detail = self.history.describe()
+        return status + '\n' + detail if detail else status
+
+    def _status(self, key):
         if key in self.errors:
             return self.errors[key]
         count = len(self.media_pending) if key == MEDIA_ID else sum(ident[0] == key for queue in (self.queue.pending, self.queue.deferred) for ident in queue)
@@ -269,6 +276,7 @@ class Automation:
         self.media_pending.insert(0, medium.token)
 
     def tick(self, blocked=False):
+        self.history.drain()
         if self.closed or self.active or blocked or self.clock() < self.next_start:
             return
         import shutil
@@ -349,7 +357,7 @@ class Automation:
             else:
                 self.restore_batch(key, batch)
             from .core import record_scan_failure
-            status, output = record_scan_failure(self.store, plan, error, key)
+            status, output = record_scan_failure(self.store, plan, error, key, save=self.history.save)
             self.finished(key, status, output, plan.label)
 
     def close(self):
@@ -358,3 +366,13 @@ class Automation:
         self.queue.deferred.clear()
         self.media_pending.clear()
         self.cancel.set()
+        # The queue is bounded. Flush what can be committed without waiting,
+        # stop at the first failure, and do not update an already closing GUI.
+        while self.history.rows:
+            before = len(self.history.rows)
+            self.history.drain(force=True, notify=False)
+            if len(self.history.rows) >= before:
+                break
+        if self.history.rows:
+            from .notification_retry import report
+            report(f'終了時に未保存の監視履歴が{len(self.history.rows)}件あります：' + self.history.error)

@@ -6,17 +6,19 @@ class Preferences:
     def __init__(self, connect):
         self.connect = connect
 
-    def get_many(self, keys):
+    def get_many(self, keys, db=None):
         keys = tuple(keys)
         if not keys:
             return {}
-        with self.connect() as db:
-            rows = db.execute('SELECT key,value FROM preferences WHERE key IN (' +
-                              ','.join('?' for _ in keys) + ')', keys).fetchall()
+        if db is None:
+            with self.connect() as connection:
+                return self.get_many(keys, db=connection)
+        rows = db.execute('SELECT key,value FROM preferences WHERE key IN (' +
+                          ','.join('?' for _ in keys) + ')', keys).fetchall()
         return {key: json.loads(value) for key, value in rows}
 
-    def get(self, key, default=None):
-        return self.get_many([key]).get(key, default)
+    def get(self, key, default=None, *, db=None):
+        return self.get_many([key], db=db).get(key, default)
 
     def set_many(self, values, db=None):
         if db is None:
