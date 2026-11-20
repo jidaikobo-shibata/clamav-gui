@@ -45,6 +45,7 @@ GROUPS={
     'encrypted':('暗号化されている対象','必要な対象か確認し、内容を検査できる状態にして再検査してください。'),
     'macros':('マクロの警告','マクロが必要な文書か、入手元と用途を確認してください。'),
     'broken':('破損などの警告','対象ファイルが正しく取得できているか確認してください。'),
+    'engine':('ClamAV本体のエラー','エラーに記載された定義ファイル・設定・読み取り権限などを確認してから再検査してください。'),
     'permission':('権限不足','対象ファイルの読み取り権限や保存場所を確認してください。'),
     'missing':('検査中に消失した対象','一時ファイルなら更新中の可能性があります。必要な対象が残っていれば再検査してください。'),
     'read':('読み取り失敗','ファイルやメディアが利用できるか確認してください。'),
@@ -73,7 +74,7 @@ def _error_group(reason):
 def build_report(entry):
     """Counts describe retained lines unless explicitly labelled as ClamAV totals."""
     counts=Counter();examples={key:[] for key in GROUPS};detections=[];detected_count=0
-    skips=Counter();error_lines=0
+    skips=Counter();error_lines=0;missing_details=[]
     for line in entry.output.splitlines():
         if line.endswith(' FOUND'):
             signature=found_signature(line);path=line[:-6].rpartition(': ')[0]
@@ -88,11 +89,20 @@ def build_report(entry):
             if separator and reason in ('Empty file','Symbolic link') and (path.startswith(('/', '\\')) or re.match(r'^[A-Za-z]:[\\/]',path)):
                 skips[reason]+=1
                 continue
+            if line.startswith('LibClamAV Error:'):
+                error_lines+=1;key='engine'
+                finding=Finding('',line.partition(':')[2].strip())
+                counts[key]+=1
+                if len(examples[key])<PREVIEW_LIMIT:examples[key].append(finding)
+                continue
             if line.endswith(' ERROR') or line.startswith('ERROR:'):
                 error_lines+=1;key=_error_group(reason if separator else line)
             elif line.startswith(('WARNING:','LibClamAV Warning:')):
                 # App truncation warnings are explained by the coverage notice.
-                if '出力の一部を省略' in line or '検出明細の保存上限' in line:continue
+                if line.startswith('WARNING:') and '検出明細の保存上限' in line:
+                    missing_details.append(line.removeprefix('WARNING:').strip())
+                    continue
+                if '出力の一部を省略' in line:continue
                 key='warning'
             else:continue
             finding=Finding(path if separator and not line.startswith(('ERROR:', 'WARNING:', 'LibClamAV Warning:')) else '',reason if separator else line)
@@ -114,7 +124,7 @@ def build_report(entry):
         description+='保持された明細が不足しているため、脅威の有無や内訳を確認できません。「検出なし」とは判断できません。'
         action='検出明細を保持できる状態で再検査してください。'
     elif entry.is_detected() or detected_count:
-        title='検出あり・検査不完了' if result.kind==ResultKind.INCOMPLETE or errors or counts else '検出あり'
+        title='検出あり・検査不完了' if result.kind in (ResultKind.INCOMPLETE,ResultKind.CANCELLED) or errors or counts or missing_details else '検出あり'
         description='脅威として報告された対象があります。保存ファイルの検出だけで、この端末での感染・実行が確定するわけではありません。'
         action='対象のファイル名・検出名・入手元を確認してください。自動削除・隔離は行っていません。'
         if not detections:action='検出ありとして記録されていますが、明細を抽出できません。詳細ログを確認し、必要に応じて再検査してください。'
@@ -127,6 +137,16 @@ def build_report(entry):
         description='完全に検査できなかった対象、または確認が必要な警告があります。'
         action='理由別の一覧を開き、必要な対象を確認して再検査してください。'
         if not counts:description=entry.status or '詳しい理由が記録されていません。'
+
+    if result.kind==ResultKind.CANCELLED:
+        if entry.is_detected() or detected_count:
+            title='検出あり・検査中止'
+        if title!='検査を中止しました':
+            description+=' 検査は中止されており、未検査の対象が残っている可能性があります。'
+            action+=' 未検査の範囲を再検査してください。'
+    if missing_details:
+        description+=' 検出明細の保存上限に達し、特定できない検出対象が残っています。'
+        action+=' 検出明細を保持できるよう、検査範囲を分けて再検査してください。'
 
     metrics=[('完了日時',entry.date_label()),('検査ファイル数',f'{files:,}件' if files is not None else '不明（記録なし）')]
     seconds=None
@@ -162,7 +182,7 @@ def build_report(entry):
     conditions=entry.target
     marker=re.search(r'^-{2,}\s*この検査で使用した設定\s*-{2,}\s*$',entry.output,re.M)
     if marker:conditions+='\n\n'+entry.output[marker.end():].strip()
-    cautions=[]
+    cautions=list(dict.fromkeys(missing_details))
     if MAILBOX_NOTE in entry.status or MAILBOX_NOTE in entry.output:
         cautions.append('メール保存ファイルは複数のメールを含む場合があります。保存ファイル自体を削除せず、メールアプリで確認してください。')
     return Report(title,description,action,tuple(metrics),detections_group,groups,skip_rows,coverage,conditions,tuple(cautions))

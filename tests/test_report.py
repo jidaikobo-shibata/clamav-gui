@@ -59,3 +59,41 @@ class ReportTests(unittest.TestCase):
         output = 'Time: ' + '9' * 5000 + ' sec\nScanned files: ' + '9' * 5000 + '\n'
         report = build_report(entry(output))
         self.assertIn(('検査ファイル数', '不明（記録なし）'), report.metrics)
+
+    def test_detection_retention_loss_is_explicit_without_opening_raw_log(self):
+        output = ('WARNING: 脅威の報告200件に対し、検出明細は1件のみ保持できました。'
+                  '検出明細の保存上限に達したため、全件を特定できません。検出なしではありません。\n'
+                  '/example/eicar: Eicar-Test-Signature FOUND\nInfected files: 200\n')
+        report = build_report(entry(output, '検出あり', 1, 'detected'))
+        self.assertEqual(report.title, '検出あり・検査不完了')
+        self.assertIn('特定できない検出対象', report.description)
+        self.assertIn('検査範囲を分けて再検査', report.action)
+        self.assertIn('200件', report.cautions[0])
+        self.assertIn('1件のみ', report.cautions[0])
+        self.assertEqual(report.detections[0].count, 1)
+        self.assertFalse(report.groups)
+
+    def test_engine_error_preserves_function_and_diagnostic(self):
+        output = 'LibClamAV Error: cli_loaddbdir(): No supported database files found\n'
+        report = build_report(entry(output))
+        self.assertEqual(report.title, '検査不完了')
+        self.assertEqual(report.groups[0].title, 'ClamAV本体のエラー')
+        self.assertEqual(report.groups[0].examples[0].path, '')
+        self.assertEqual(report.groups[0].examples[0].detail,
+                         'cli_loaddbdir(): No supported database files found')
+        self.assertIn('定義ファイル', report.groups[0].action)
+
+    def test_cancelled_with_detection_preserves_both_outcomes(self):
+        report = build_report(entry('/example/eicar: Test FOUND\n',
+                                    '検査を中止しました', 1, 'cancelled'))
+        self.assertEqual(report.title, '検出あり・検査中止')
+        self.assertIn('未検査', report.description)
+        self.assertIn('再検査', report.action)
+        self.assertEqual(report.detections[0].count, 1)
+
+    def test_cancelled_uncertain_log_keeps_uncertainty_and_cancellation(self):
+        report = build_report(entry('出力が大きいため末尾のみ保存しています。\nInfected files: 57\n',
+                                    '検査を中止しました', 0, 'cancelled'))
+        self.assertEqual(report.title, '要確認・内訳不明')
+        self.assertIn('中止', report.description)
+        self.assertIn('未検査', report.action)
