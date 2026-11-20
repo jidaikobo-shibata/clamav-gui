@@ -130,6 +130,9 @@ class Monitor:
         self.last_state = None
         self.control = True
         self.command_value = {}
+        self.command_result = None
+        self.command_due = self.command_attempts = 0
+        self.command_error = ''
         self.checkpoint_due = self.checkpoint_attempts = 0
         self.checkpoint_error = ''
         self.checkpoint_scans_pending = False
@@ -176,6 +179,30 @@ class Monitor:
             notice = self.notices.flush(key)
             self.notification_retry.add(notice)
         self.notification_retry.drain(self.notifier, force=force)
+
+    def process_command(self, now):
+        command = self.command_value
+        if self.command_result is None and command and command.get('token') != self.command:
+            token = command.get('token')
+            if command.get('action') == 'media' and time.time()-command.get('created', 0) < 30:
+                count = self.observers.scan_connected()
+                self.command_result = dict(token=token, count=count)
+            self.command = token
+        if self.command_result is None or now < self.command_due:
+            return
+        try:
+            with self.store.connect() as db:
+                db.execute('PRAGMA busy_timeout=0')
+                self.store.preferences.set('background-command-result', self.command_result, db=db)
+        except sqlite3.Error as error:
+            self.command_attempts += 1
+            self.command_due = now + min(300, 5 * 2**min(self.command_attempts-1, 6))
+            self.command_error = '検査要求の受付結果を保存できません。自動で再試行します：' + str(error)[:256]
+            report(self.command_error)
+        else:
+            self.command_result = None
+            self.command_due = self.command_attempts = 0
+            self.command_error = ''
 
     def tick(self):
         now = time.monotonic()
@@ -231,12 +258,7 @@ class Monitor:
             self.observers.configure(list(self.engine.plans.items()))
         if not getattr(self.observers, 'discovering', self.observers.tasks):
             self.save_checkpoints(baseline=True)
-        command = self.command_value
-        if command and command.get('token') != self.command:
-            self.command = command.get('token')
-            if command.get('action') == 'media' and time.time()-command.get('created', 0) < 30:
-                count = self.observers.scan_connected()
-                put_preference(self.store, 'background-command-result', dict(token=self.command, count=count))
+        self.process_command(now)
         self.engine.tick()
         self.flush()
         self.outbox.pump()
@@ -244,6 +266,8 @@ class Monitor:
         statuses[MEDIA_ID] = self.engine.status(MEDIA_ID)
         if not __import__('shutil').which('clamscan'):
             statuses = {key: 'ClamAV未導入：検査待ちを保持しています' for key in statuses}
+        if self.command_error:
+            statuses[MEDIA_ID] += '\n' + self.command_error
         for error in (self.checkpoint_error, self.config_error):
             if error:
                 statuses = {key: value + '\n' + error for key, value in statuses.items()}

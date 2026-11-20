@@ -113,7 +113,9 @@ class OutboxTests(unittest.TestCase):
         self.outbox.enqueue('detected','detail','critical')
         with patch('clam_gui.notification_outbox.threading.Thread') as thread:
             thread.return_value.start.side_effect=RuntimeError('cannot start')
-            with self.assertRaises(RuntimeError):self.outbox.pump()
+            self.outbox.pump()
+        self.assertIsNone(self.outbox.thread)
+        self.assertIn('cannot start',self.outbox.state()['error'])
         self.assertEqual(self.outbox.state()['pending'],1)
 
 

@@ -515,3 +515,103 @@ class RecoveryTests(unittest.TestCase):
             self.assertNotIn(('p',str(old)),monitor.observers.monitors)
             self.assertIn(('p',str(new)),monitor.observers.monitors)
         self.assertFalse(monitor.stopping);self.assertFalse(monitor.config_error)
+
+    def test_media_ack_retries_without_repeating_request_or_losing_new_command(self):
+        from clam_gui.background import put_preference,preference
+        monitor=self.monitor();monitor.observers.configure=Mock()
+        monitor.observers.scan_connected=Mock(return_value=2)
+        put_preference(self.store,'background-enabled',True)
+        put_preference(self.store,'background-command',dict(token='first',action='media',created=time.time()))
+        with patch('clam_gui.monitor.time.monotonic',return_value=100) as clock, \
+             patch.object(monitor.engine,'tick') as tick:
+            with self.store.connect() as lock:
+                lock.execute('BEGIN IMMEDIATE')
+                started=time.perf_counter()
+                self.assertTrue(monitor.checked_tick())
+                self.assertLess(time.perf_counter()-started,1)
+                self.assertEqual(monitor.command_due,105)
+                self.assertEqual(monitor.command_result,dict(token='first',count=2))
+                clock.return_value=101;self.assertTrue(monitor.checked_tick())
+                self.assertEqual(monitor.command_due,105)
+                clock.return_value=105;self.assertTrue(monitor.checked_tick())
+                self.assertEqual(monitor.command_due,115)
+                monitor.observers.scan_connected.assert_called_once()
+            put_preference(self.store,'background-command',dict(token='second',action='media',created=time.time()))
+            clock.return_value=115;self.assertTrue(monitor.checked_tick())
+            self.assertEqual(preference(self.store,'background-command-result'),dict(token='first',count=2))
+            monitor.observers.scan_connected.assert_called_once()
+            self.assertIsNone(monitor.command_result);self.assertEqual(monitor.command_error,'')
+            clock.return_value=116;self.assertTrue(monitor.checked_tick())
+            self.assertEqual(preference(self.store,'background-command-result'),dict(token='second',count=2))
+            self.assertEqual(monitor.observers.scan_connected.call_count,2)
+            self.assertEqual(tick.call_count,5)
+        self.assertFalse(monitor.stopping);self.assertIsNone(monitor.failure)
+
+    def test_notification_start_failure_keeps_monitor_running_and_retries_delivery(self):
+        from clam_gui.background import put_preference
+        monitor=self.monitor();monitor.observers.configure=Mock()
+        put_preference(self.store,'background-enabled',True)
+        monitor.outbox.enqueue('synthetic','body','critical')
+        with patch('clam_gui.monitor.time.monotonic',return_value=100) as clock:
+            with patch('clam_gui.notification_outbox.threading.Thread.start',side_effect=RuntimeError('cannot start')) as start:
+                self.assertTrue(monitor.checked_tick())
+                self.assertFalse(monitor.stopping);self.assertIsNone(monitor.failure)
+                self.assertEqual(monitor.outbox.state()['pending'],1)
+                self.assertIn('cannot start',monitor.last_state['notifications']['error'])
+                clock.return_value=104;self.assertTrue(monitor.checked_tick())
+                start.assert_called_once()
+            clock.return_value=105;self.assertTrue(monitor.checked_tick())
+            monitor.outbox.thread.join(timeout=2)
+            self.assertFalse(monitor.outbox.thread.is_alive())
+        self.assertEqual(monitor.outbox.state()['pending'],0)
+        self.assertEqual(monitor.outbox.state()['error'],'')
+        monitor.outbox.deliver.assert_called_once_with('synthetic','body','critical')
+
+    def test_notification_thread_constructor_and_reporting_failure_are_contained(self):
+        monitor=self.monitor();monitor.outbox.enqueue('synthetic','body')
+        with patch('clam_gui.notification_outbox.threading.Thread',side_effect=RuntimeError('constructor failed')), \
+             patch('builtins.print',side_effect=BrokenPipeError('closed log')):
+            monitor.outbox.pump()
+        self.assertIsNone(monitor.outbox.thread)
+        self.assertEqual(monitor.outbox.state()['pending'],1)
+        self.assertIn('constructor failed',monitor.outbox.state()['error'])
+
+    def test_gio_events_continue_during_ack_and_notification_start_failures(self):
+        from gi.repository import GLib
+        from clam_gui.gio_watch import Observers
+        from clam_gui.core import Plan
+        from clam_gui.background import put_preference
+        class Volumes:
+            def connect(self,*args):return len(args)
+            def disconnect(self,*args):pass
+            def get_mounts(self):return []
+        folder=self.root/'watched';folder.mkdir()
+        plans=[('p',Plan('watched',[str(folder)],[],kind='watch'))]
+        monitor=Monitor(self.store,observers=lambda engine:Observers(engine,Volumes()),notifier=Mock())
+        self.addCleanup(monitor.shutdown)
+        put_preference(self.store,'background-enabled',True)
+        with patch('clam_gui.monitor.watched_plans',return_value=plans), \
+             patch('clam_gui.monitor.time.monotonic',return_value=100) as clock, \
+             patch.object(monitor.engine,'tick'):
+            self.assertTrue(monitor.checked_tick())
+            deadline=time.perf_counter()+3
+            while monitor.observers.idle is not None and time.perf_counter()<deadline:
+                GLib.MainContext.default().iteration(False)
+            self.assertIsNone(monitor.observers.idle)
+            self.assertTrue(monitor.checked_tick())
+            watcher=monitor.observers.monitors['p',str(folder)]
+            put_preference(self.store,'background-command',dict(token='test',action='media',created=time.time()))
+            monitor.outbox.enqueue('synthetic','body')
+            clock.return_value=103
+            with self.store.connect() as lock:
+                lock.execute('BEGIN IMMEDIATE')
+                with patch('clam_gui.notification_outbox.threading.Thread.start',side_effect=RuntimeError('cannot start')):
+                    self.assertTrue(monitor.checked_tick())
+                self.assertTrue(monitor.command_error);self.assertTrue(monitor.outbox.worker_error)
+                self.assertIs(monitor.observers.monitors['p',str(folder)],watcher)
+                file=folder/'arrived';file.touch()
+                deadline=time.perf_counter()+3
+                while ('p',str(file)) not in monitor.engine.queue.pending and time.perf_counter()<deadline:
+                    GLib.MainContext.default().iteration(False)
+                self.assertIn(('p',str(file)),monitor.engine.queue.pending)
+            self.assertFalse(monitor.stopping);self.assertIsNone(monitor.failure)

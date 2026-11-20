@@ -2,6 +2,7 @@
 import threading
 import time
 import uuid
+from .notification_retry import report
 
 
 class NotificationOutbox:
@@ -13,6 +14,7 @@ class NotificationOutbox:
         self.thread = None
         self.guard = threading.Lock()
         self.retry_after = 0
+        self.worker_error = ''
         self.next_poll = 0
         self.state_at = float('-inf')
         self.state_value = None
@@ -50,7 +52,7 @@ class NotificationOutbox:
     def state(self):
         with self.store.connect() as db:
             count = db.execute('SELECT COALESCE(sum(count),0) FROM notification_outbox').fetchone()[0]
-        return dict(pending=count, error=self.store.preferences.get('notification-error', ''))
+        return dict(pending=count, error=self.worker_error or self.store.preferences.get('notification-error', ''))
 
     def cached_state(self):
         now = time.monotonic()
@@ -110,15 +112,21 @@ class NotificationOutbox:
                     while not self.stop.is_set() and self.deliver_one():
                         pass
                 except Exception as error:
-                    self.retry_after = time.monotonic()+5
-                    print('通知の配信状態を更新できません。未配信通知を保持します：' + str(error), flush=True)
-            self.thread = threading.Thread(target=worker, daemon=False)
+                    self.delivery_failed(error)
             try:
+                self.worker_error = ''
+                self.state_at = float('-inf')
+                self.thread = threading.Thread(target=worker, daemon=False)
                 self.thread.start()
-            except Exception:
-                self.retry_after = time.monotonic()+5
+            except Exception as error:
                 self.thread = None
-                raise
+                self.delivery_failed(error)
+
+    def delivery_failed(self, error):
+        self.retry_after = time.monotonic()+5
+        self.worker_error = '通知の配送を開始・継続できません。再試行します：' + str(error)[:256]
+        self.state_at = float('-inf')
+        report(self.worker_error)
 
     def close(self):
         self.stop.set()
