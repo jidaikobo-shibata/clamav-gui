@@ -91,7 +91,7 @@ class BackgroundService:
         return (MARKER + '[Unit]\nDescription=ClamAV GUI session monitoring\n'
                 'PartOf=graphical-session.target\nAfter=graphical-session-pre.target\n\n'
                 '[Service]\nType=simple\nExecStart=' + ' '.join(map(quote, args)) +
-                '\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=20\nUMask=0077\nNice=10\nIOSchedulingClass=best-effort\nIOSchedulingPriority=7\nCPUWeight=20\nIOWeight=20\n'
+                '\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=40\nUMask=0077\nNice=10\nIOSchedulingClass=best-effort\nIOSchedulingPriority=7\nCPUWeight=20\nIOWeight=20\n'
                 '\n[Install]\nWantedBy=graphical-session.target\n')
 
     def apply(self, enable):

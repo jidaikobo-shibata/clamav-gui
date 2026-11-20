@@ -26,21 +26,23 @@ class NotificationOutbox:
                 if column not in columns:
                     db.execute(f'ALTER TABLE notification_outbox ADD COLUMN {column} {definition}')
 
-    def enqueue(self, title, body, urgency='normal'):
+    def enqueue(self, title, body, urgency='normal', *, count=1):
+        if type(count) is not int or not 1 <= count <= 2**63-1:
+            raise ValueError('通知件数が不正です。')
         self.next_poll = 0
         self.state_at = float('-inf')
         urgency = 'critical' if urgency == 'critical' else 'normal'
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            count = db.execute('SELECT count(*) FROM notification_outbox WHERE merge_key IS NULL').fetchone()[0]
-            if count < self.LIMIT:
-                db.execute('INSERT INTO notification_outbox (title,body,urgency,count,attempts,due) VALUES (?,?,?,1,0,?)',
-                           (title[:256], body[:8192], urgency, self.clock()))
+            rows = db.execute('SELECT count(*) FROM notification_outbox WHERE merge_key IS NULL').fetchone()[0]
+            if rows < self.LIMIT:
+                db.execute('INSERT INTO notification_outbox (title,body,urgency,count,attempts,due) VALUES (?,?,?,?,0,?)',
+                           (title[:256], body[:8192], urgency, count, self.clock()))
             else:
                 # Two reserved summary rows bound storage while retaining every notice count.
                 db.execute('INSERT INTO notification_outbox (title,body,urgency,merge_key,count,attempts,due) '
-                           'VALUES (?,?,?,?,1,0,?) ON CONFLICT(merge_key) DO UPDATE SET count=count+1',
-                           ('ClamAV 自動検査の通知（まとめ）', '', urgency, urgency, self.clock()))
+                           'VALUES (?,?,?,?,?,0,?) ON CONFLICT(merge_key) DO UPDATE SET count=count+excluded.count',
+                           ('ClamAV 自動検査の通知（まとめ）', '', urgency, urgency, count, self.clock()))
 
     def state(self):
         with self.store.connect() as db:

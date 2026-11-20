@@ -1,7 +1,10 @@
 """Headless GLib monitoring process; no Gtk application or desktop window."""
 from .notifications import AutomaticNotices
 from .notification_outbox import NotificationOutbox
+from .notification_retry import NotificationRetry, report
+from .runtime import retry_cleanup
 import json
+import sqlite3
 import time
 from .platforms import get_backend
 from .automation import Automation, MEDIA_ID, signature, SIGNATURE_VERSION
@@ -102,6 +105,7 @@ class Monitor:
         self.store = store
         self.outbox = NotificationOutbox(store, notifier)
         self.notifier = self.outbox.enqueue
+        self.notification_retry = NotificationRetry(store.path.parent)
         self.loop = GLib.MainLoop()
         self.lease = Lease(store)
         self.revision = time.time()
@@ -110,6 +114,7 @@ class Monitor:
         self.observers = (observers or get_backend().observers)(self.engine)
         self.observers.inventory = self.checkpoints.inventory
         self.notices, self.command = AutomaticNotices(), None
+        self.timer = None
         self.stopping = False
         self.failure = None
         self.last_tick = time.time()
@@ -128,13 +133,15 @@ class Monitor:
         self.changed()
         notice = self.notices.record(key, label or key, status, output)
         if notice:
-            self.notifier(notice.title, notice.body, notice.urgency)
+            self.notification_retry.add(notice)
+            self.notification_retry.drain(self.notifier)
         self.checkpoints.scanned()
 
     def flush(self, force=False):
         for key in self.notices.due(force):
             notice = self.notices.flush(key)
-            self.notifier(notice.title, notice.body, notice.urgency)
+            self.notification_retry.add(notice)
+        self.notification_retry.drain(self.notifier, force=force)
 
     def tick(self):
         now = time.monotonic()
@@ -152,6 +159,11 @@ class Monitor:
         if not self.lease.acquire():
             self.last_control = float('-inf')
             return True  # GUI finishes any scan before yielding monitoring ownership.
+        try:
+            retry_cleanup(self.store, wait=False)
+        except sqlite3.Error:
+            pass  # The owner retries again; cleanup must not block the GLib thread.
+        self.notification_retry.load()
         now = time.monotonic()
         resumed = time.time()-self.last_tick > 15
         self.last_tick = time.time()
@@ -184,8 +196,11 @@ class Monitor:
             statuses = {key: 'ClamAV未導入：検査待ちを保持しています' for key in statuses}
         # Publish changed state promptly; keep the eight-second lease fresh at
         # three-second intervals without rewriting identical state twice a second.
+        delivery = dict(self.outbox.cached_state())
+        delivery['pending'] += self.notification_retry.count
+        delivery['error'] = self.notification_retry.error or delivery.get('error', '')
         state = dict(generation=self.generation, revision=self.revision, statuses=statuses,
-                     active=self.engine.active_key, notifications=self.outbox.cached_state())
+                     active=self.engine.active_key, notifications=delivery)
         if state != self.last_state or now - self.last_publish >= 3:
             put_preference(self.store, 'background-state', dict(updated=time.time(), **state))
             self.last_state, self.last_publish = state, now
@@ -193,10 +208,14 @@ class Monitor:
 
     def checked_tick(self):
         try:
-            return self.tick()
+            keep = self.tick()
+            if not keep:
+                self.timer = None
+            return keep
         except Exception as error:
+            self.timer = None
             self.failure = error
-            print('常駐監視を停止します：' + str(error), flush=True)
+            report('常駐監視を停止します：' + str(error))
             try:
                 self.stop()
             finally:
@@ -217,17 +236,41 @@ class Monitor:
             finally:
                 self.engine.close()
 
-    def run(self):
-        get_backend().install_stop_handlers(self.stop)
-        GLib.timeout_add(500, self.checked_tick)
-        try:
-            self.loop.run()
-        finally:
-            self.stop()
-            self.flush(True)
-            self.outbox.close()
-            self.lease.close()
+    def shutdown(self):
+        """Every resource gets an independent cleanup attempt, despite earlier errors."""
+        errors = []
+        def attempt(label, action):
+            try:
+                action()
+            except Exception as error:
+                errors.append(error)
+                report(label + '：' + str(error))
+        attempt('監視停止に失敗しました', self.stop)
+        attempt('終了時の通知保存に失敗しました', lambda: self.flush(True))
+        if self.notification_retry.rows:
+            attempt('未保存通知の退避に失敗しました', self.notification_retry.persist)
+        attempt('通知配送の停止に失敗しました', self.outbox.close)
+        attempt('実行記録の整理に失敗しました', lambda: retry_cleanup(self.store, wait=False))
+        def clear_state():
             if preference(self.store, 'background-state', {}).get('generation') == self.generation:
                 put_preference(self.store, 'background-state', {})
+        # Clear shared state while still owning the lease; never race a new owner.
+        attempt('終了状態の保存に失敗しました', clear_state)
+        attempt('監視ロックの解放に失敗しました', self.lease.close)
+        if errors and self.failure is None:
+            self.failure = errors[0]
+
+    def run(self):
+        try:
+            get_backend().install_stop_handlers(self.stop)
+            self.timer = GLib.timeout_add(500, self.checked_tick)
+            self.loop.run()
+        finally:
+            try:
+                if self.timer is not None:
+                    GLib.source_remove(self.timer)
+                    self.timer = None
+            finally:
+                self.shutdown()
         if self.failure:
             raise RuntimeError('常駐監視でエラーが発生しました。') from self.failure

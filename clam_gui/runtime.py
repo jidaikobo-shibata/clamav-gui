@@ -5,7 +5,50 @@ import datetime
 import os
 import sqlite3
 import uuid
+import sys
+import threading
 from .execution import ScanAlreadyQueued, ScanQueueFull
+
+_cleanup_guard = threading.Lock()
+_pending_cleanup = {}
+
+
+def cleanup_key(store):
+    return str(store.path.resolve()), os.getpid()
+
+
+def retry_cleanup(store, *, wait=True):
+    """Retry only tokens completed by this process, with the registered owner."""
+    key = cleanup_key(store)
+    with _cleanup_guard:
+        pending = dict(_pending_cleanup.get(key, {}))
+    if not pending:
+        return
+    with store.connect() as db:
+        if not wait:
+            db.execute('PRAGMA busy_timeout=0')
+        db.execute('BEGIN IMMEDIATE')
+        for token, identity in pending.items():
+            row = db.execute('SELECT pid,identity FROM scan_runs WHERE token=?', (token,)).fetchone()
+            if row is None or row == (os.getpid(), identity):
+                db.execute('DELETE FROM scan_run_details WHERE token=?', (token,))
+                db.execute('DELETE FROM scan_runs WHERE token=? AND pid=? AND identity IS ?',
+                           (token, os.getpid(), identity))
+    with _cleanup_guard:
+        current = _pending_cleanup.get(key, {})
+        for token in pending:
+            current.pop(token, None)
+        if not current:
+            _pending_cleanup.pop(key, None)
+
+
+def completed_here(store):
+    try:
+        retry_cleanup(store, wait=False)
+    except sqlite3.Error:
+        pass  # Keep retry metadata; reads can still work during a write failure.
+    with _cleanup_guard:
+        return set(_pending_cleanup.get(cleanup_key(store), {}))
 
 
 def process_identity(pid):
@@ -41,10 +84,13 @@ class Activity:
 
 
 def activities(store):
+    completed = completed_here(store)
     with store.connect() as db:
         rows = db.execute("SELECT r.token,r.profile_id,r.pid,r.identity,r.started,r.cancel_requested,COALESCE(d.phase,'running'),COALESCE(d.lane,'full') FROM scan_runs r LEFT JOIN scan_run_details d ON d.token=r.token").fetchall()
     result = []
     for token, profile_id, pid, identity, started, stopping, phase, lane in rows:
+        if token in completed:
+            continue
         current = process_identity(pid)
         if current is not None and (not current or (identity is not None and current != identity)):
             continue
@@ -75,14 +121,15 @@ class RunningScan:
             return False
 
     def is_next(self):
+        completed = completed_here(self.store)
         if self.token is None:
             return True
         with self.store.connect() as db:
             current = db.execute("SELECT r.rowid,COALESCE(d.lane,'full') FROM scan_runs r LEFT JOIN scan_run_details d ON d.token=r.token WHERE r.token=?", (self.token,)).fetchone()
             if not current:
                 return False
-            rows = db.execute("SELECT r.pid,r.identity FROM scan_runs r LEFT JOIN scan_run_details d ON d.token=r.token WHERE COALESCE(d.lane,'full')=? AND r.rowid<?", (current[1],current[0])).fetchall()
-        return not any(is_alive(pid, identity) for pid, identity in rows)
+            rows = db.execute("SELECT r.token,r.pid,r.identity FROM scan_runs r LEFT JOIN scan_run_details d ON d.token=r.token WHERE COALESCE(d.lane,'full')=? AND r.rowid<?", (current[1],current[0])).fetchall()
+        return not any(token not in completed and is_alive(pid, identity) for token, pid, identity in rows)
 
     def started(self, stamp):
         if self.token:
@@ -100,6 +147,8 @@ def is_alive(pid, identity):
 def track_scan(store, profile_id, started, *, phase='running', lane='full', deduplicate=False):
     token = uuid.uuid4().hex if profile_id else None
     if token:
+        retry_cleanup(store)
+        owner_identity = process_identity(os.getpid())
         with store.connect() as db:
             # Serialize registration so separate GUI/CLI processes cannot both enqueue a plan.
             db.execute('BEGIN IMMEDIATE')
@@ -114,12 +163,18 @@ def track_scan(store, profile_id, started, *, phase='running', lane='full', dedu
                 if db.execute("SELECT count(*) FROM scan_runs r LEFT JOIN scan_run_details d ON d.token=r.token WHERE COALESCE(d.lane,'full')=?", (lane,)).fetchone()[0] >= 32:
                     raise ScanQueueFull('同じ種類の実行中・待機中の検査が合計上限32件に達しました。完了後に再度依頼してください。')
             db.execute('INSERT INTO scan_runs (token,profile_id,pid,identity,started,cancel_requested) VALUES (?,?,?,?,?,0)',
-                       (token, profile_id, os.getpid(), process_identity(os.getpid()), started))
+                       (token, profile_id, os.getpid(), owner_identity, started))
             db.execute('INSERT INTO scan_run_details VALUES (?,?,?)', (token,phase,lane))
     try:
         yield RunningScan(store, token)
     finally:
         if token:
-            with store.connect() as db:
-                db.execute('DELETE FROM scan_run_details WHERE token=?', (token,))
-                db.execute('DELETE FROM scan_runs WHERE token=?', (token,))
+            # Mark completion before attempting a write that may fail or roll back.
+            with _cleanup_guard:
+                _pending_cleanup.setdefault(cleanup_key(store), {})[token] = owner_identity
+            active_error = sys.exc_info()[0] is not None
+            try:
+                retry_cleanup(store)
+            except sqlite3.Error:
+                if not active_error:
+                    raise

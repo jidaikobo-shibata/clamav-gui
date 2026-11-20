@@ -13,3 +13,6 @@ build/
 .aws/
 .backups/
 .serena/
+
+notification-retry.json
+.notification-retry-*
