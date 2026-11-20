@@ -77,6 +77,34 @@ class AptManager:
                     installed[name] = fields[2]
         return installed
 
+    def engine_update_status(self):
+        """Compare the installed APT package with the locally known candidate."""
+        installed = self.status().get('clamav')
+        if not installed:
+            return ('ClamAV本体：APT未導入', 'APT管理下のclamavパッケージは未導入です。手動導入したClamAVの更新状態は判定しません。')
+        env = {**os.environ, 'LC_ALL': 'C'}
+        try:
+            result = self.run(['/usr/bin/apt-cache', 'policy', 'clamav'],
+                              capture_output=True, text=True, timeout=15, env=env)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return (f'ClamAV本体（APT） {installed}：更新状態不明', str(error))
+        candidates = re.findall(r'^\s*Candidate:\s*(\S+)\s*$', result.stdout, re.M)
+        if result.returncode or len(candidates) != 1 or candidates[0] == '(none)':
+            return (f'ClamAV本体（APT） {installed}：更新状態不明', 'APTの更新候補を確認できませんでした。')
+        candidate = candidates[0]
+        try:
+            comparison = self.run(['/usr/bin/dpkg', '--compare-versions', installed, 'lt', candidate],
+                                  capture_output=True, text=True, timeout=10, env=env)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return (f'ClamAV本体（APT） {installed}：更新状態不明', str(error))
+        if comparison.returncode not in (0, 1):
+            return (f'ClamAV本体（APT） {installed}：更新状態不明', 'パッケージのバージョンを比較できませんでした。')
+        label = f'更新あり → {candidate}' if comparison.returncode == 0 else '更新なし（APT情報）'
+        return (f'ClamAV本体（APT） {installed}：{label}',
+                'APT管理下のclamavパッケージの状態です。\n'
+                'OSが保持するパッケージ情報との比較であり、情報が古い場合があります。\n'
+                'この確認では配布情報の取得や本体の更新は行いません。Ubuntuのソフトウェア更新で更新してください。')
+
     @staticmethod
     def arguments(action):
         if action not in ('install', 'remove'):

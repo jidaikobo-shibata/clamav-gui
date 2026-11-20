@@ -40,6 +40,32 @@ class PackageWindow:
             self.show_auto_status(AutoUpdateState(detail='状態確認を開始できませんでした：' + str(error)))
         start_worker(worker, failed)
 
+    def refresh_engine_status(self, force=False):
+        if self.engine_checking:
+            self.engine_check_pending |= force
+            return
+        if not force and self.engine_checked_at is not None and time.monotonic()-self.engine_checked_at < 300:
+            return
+        self.engine_checking = True
+        self.engine_refresh.set_sensitive(False)
+        def deliver(label, detail):
+            self.engine_checking = False
+            self.engine_checked_at = time.monotonic()
+            self.engine_label.set_text(label)
+            self.engine_label.set_tooltip_text(detail)
+            self.engine_refresh.set_sensitive(True)
+            if self.engine_check_pending:
+                self.engine_check_pending = False
+                self.refresh_engine_status(force=True)
+            return False
+        def worker():
+            try:
+                label, detail = self.backend.packages().engine_update_status()
+            except Exception as error:
+                label, detail = 'ClamAV本体：更新状態を確認できません', str(error)
+            GLib.idle_add(deliver, label, detail)
+        start_worker(worker, lambda error: deliver('ClamAV本体：更新状態を確認できません', str(error)))
+
     def package_setup(self, manager=None, updater=None, update_only=False, auto_manager=None):
         manager = manager or self.backend.packages()
         updater = updater or self.backend.updater()
@@ -138,6 +164,7 @@ class PackageWindow:
                 def finished():
                     if state['closed']:
                         return False
+                    self.refresh_engine_status(force=True)
                     state['installed'] = installed
                     state['auto'] = auto_state
                     state['setting_switch'] = True

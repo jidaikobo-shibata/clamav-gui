@@ -24,6 +24,7 @@ from unittest.mock import patch
 from clam_gui.definitions import AutoUpdateState
 auto_patch = patch('clam_gui.definitions.AutoUpdateService')
 auto_service = auto_patch.start()
+patch('clam_gui.packages.AptManager.engine_update_status', return_value=('ClamAV本体（APT） test：更新なし（APT情報）', 'test')).start()
 auto_service.return_value.status.return_value = AutoUpdateState(True, True, True, 24)
 from clam_gui.options import DEFAULTS, LIMITS
 # Keep the GUI test independent of whether the real ClamAV package is installed.
@@ -114,6 +115,8 @@ def check():
     app.store.save('2026-11-16T11:00:00+09:00', plan.describe(), '検出あり' + MAILBOX_NOTE, mailbox_guidance([('/example/INBOX', False)]), key)
     app.refresh_profiles(key)
     settle_history()
+    assert '更新なし（APT情報）' in app.engine_label.get_text()
+    assert app.engine_refresh.get_sensitive()
     assert len(app.log_entries) == 2
     assert app.history_list.get_row_at_index(0).get_child().get_attributes() is not None
     assert app.history_list.get_row_at_index(1).get_child().get_attributes() is None

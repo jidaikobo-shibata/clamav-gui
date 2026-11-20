@@ -38,6 +38,9 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         self.auto_status = None
         self.auto_checking = False
         self.auto_checked_at = None
+        self.engine_checking = False
+        self.engine_checked_at = None
+        self.engine_check_pending = False
         self.install_prompt_checked = False
         self.install_prompt = None
 
@@ -138,6 +141,14 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         self.definition_button.connect('clicked', lambda _: self.package_setup(update_only=True))
         definitions.append(self.definition_button)
         footer.append(definitions)
+        engine = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        self.engine_label = Gtk.Label(label='ClamAV本体：確認中…', xalign=1, wrap=True, selectable=True)
+        engine.append(self.engine_label)
+        self.engine_refresh = Gtk.Button(icon_name='view-refresh-symbolic', tooltip_text='ClamAV本体の更新状態を再確認')
+        self.engine_refresh.update_property([Gtk.AccessibleProperty.LABEL], ['ClamAV本体の更新状態を再確認'])
+        self.engine_refresh.connect('clicked', lambda _: self.refresh_engine_status(force=True))
+        engine.append(self.engine_refresh)
+        footer.append(engine)
         self.refreshing_profiles = False
         self.action_key = None
         self.log_entries = []
@@ -150,6 +161,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         self.automation_timer = GLib.timeout_add(500, self.tick_automation)
         self.state_timer = GLib.timeout_add_seconds(1, self.poll_plans)
         window.present()
+        self.refresh_engine_status()
         self.install_prompt_timer = GLib.timeout_add(250, self.offer_install)
 
     def offer_install(self):
@@ -299,6 +311,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
                     self.show_notice(f'接続済みの外部メディア{count}件を検査待ちに追加しました。' if count else '検査できる外部メディアが接続されていません。')
                     self.media_request_token = None
         self.refresh_auto_status()
+        self.refresh_engine_status()
         self.definition_label.set_text(self.backend.definition_label())
         self.definition_button.set_sensitive(not self.busy and not self.schedule_busy)
         self.new_action.set_enabled(not self.busy and not self.schedule_busy)
