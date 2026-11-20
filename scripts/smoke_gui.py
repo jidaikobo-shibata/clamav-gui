@@ -157,6 +157,18 @@ def check():
     caution_label = app.history_list.get_row_at_index(0).get_child()
     assert caution_label.get_attributes() is not None
     assert '要確認・内訳不明' in caution_label.get_text()
+    assert app.result.report.title == '要確認・内訳不明'
+    assert not app.result.raw_loaded
+    assert not app.result.raw_expander.get_expanded()
+    reasons = app.result.reason_expanders
+    assert len(reasons) == 1 and reasons[0].get_child() is None
+    reasons[0].set_expanded(True)
+    assert reasons[0].get_child() is not None
+    app.result.raw_expander.set_expanded(True)
+    assert app.result.raw_loaded
+    copy_button = app.result.raw_expander.get_child().get_first_child()
+    copy_button.emit('clicked')
+
     assert caution_label.get_tooltip_text()
     buffer = app.result.get_buffer()
     caution_text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)

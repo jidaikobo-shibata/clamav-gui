@@ -4,6 +4,8 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import GLib, Gtk, Pango
 from ..automation import MEDIA_ID, media_plan
 from ..async_reader import LatestReader
+from ..report import build_report
+from .report import ReportPane
 
 
 class HistoryController:
@@ -21,7 +23,7 @@ class HistoryController:
             self.reader.submit(load, done)
         except Exception as error:
             self.loading = False
-            self.text.get_buffer().set_text('履歴の読込みを開始できませんでした：' + str(error))
+            self.text.show_message('履歴の読込みを開始できませんでした：' + str(error))
 
     def reload(self, selected, *, latest=False):
         self.latest_requested = latest or (self.latest_requested and selected == self.selected)
@@ -29,7 +31,7 @@ class HistoryController:
         old_id = self.entries[old.get_index()].id if old and old.get_index() < len(self.entries) else None
         if selected != self.selected:
             self.shown = None
-            self.text.get_buffer().set_text('履歴を読み込んでいます…')
+            self.text.show_message('履歴を読み込んでいます…')
         self.loading = True
         self.selected = selected
         if not selected:
@@ -63,7 +65,7 @@ class HistoryController:
         self.loading = False
         if error:
             self.shown = None
-            self.text.get_buffer().set_text('履歴を読み込めませんでした：' + str(error))
+            self.text.show_message('履歴を読み込めませんでした：' + str(error))
         else:
             self.select()
 
@@ -73,25 +75,28 @@ class HistoryController:
         row = self.listing.get_selected_row()
         if not self.selected or row is None or row.get_index() >= len(self.entries):
             self.shown = None
-            self.text.get_buffer().set_text('検査記録はありません。')
+            self.text.show_message('検査記録はありません。')
             return
         ident = self.entries[row.get_index()].id
         if self.shown == ident:
             return
         self.shown = None
-        self.text.get_buffer().set_text('ログを読み込んでいます…')
+        self.text.show_message('ログを読み込んでいます…')
         key, plan = self.selected
-        self.read(lambda: self.store.history_entry(ident, key, plan), self._body)
+        def load():
+            entry = self.store.history_entry(ident, key, plan)
+            return (entry, build_report(entry) if entry else None)
+        self.read(load, self._body)
 
-    def _body(self, entry, error):
+    def _body(self, loaded, error):
+        entry, report = loaded if loaded else (None, None)
         self.shown = entry.id if entry else None
         if error:
-            text = 'ログを読み込めませんでした：' + str(error)
+            self.text.show_message('ログを読み込めませんでした：' + str(error))
         elif entry is None:
-            text = 'この履歴は整理されたため参照できません。履歴を再読み込みしてください。'
+            self.text.show_message('この履歴は整理されたため参照できません。履歴を再読み込みしてください。')
         else:
-            text = entry.attention_notice() + entry.date_label() + '\n' + entry.status + '\n\n' + entry.target + '\n\n' + entry.output
-        self.text.get_buffer().set_text(text)
+            self.text.show_entry(entry, report)
 
     def close(self):
         self.reader.close()
@@ -112,7 +117,7 @@ class HistoryView:
         listing.update_property([Gtk.AccessibleProperty.LABEL], ['外部メディアの検査完了日時'])
         scroll = Gtk.ScrolledWindow(width_request=210);scroll.set_child(listing)
         panes.set_start_child(scroll)
-        text = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        text = ReportPane()
         text.update_property([Gtk.AccessibleProperty.LABEL], ['選択した外部メディア検査のログ'])
         scroll = Gtk.ScrolledWindow();scroll.set_child(text)
         panes.set_end_child(scroll);panes.set_position(230)

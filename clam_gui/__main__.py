@@ -20,6 +20,7 @@ from .ui.plans import PlanEditor
 from .ui.preferences import PreferencesWindow
 from .ui.packages import PackageWindow
 from .ui.history import HistoryView
+from .ui.report import ReportPane
 
 
 class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk.Application):
@@ -104,7 +105,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         body = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True)
         box.append(body)
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, width_request=185, margin_end=12)
-        left.append(Gtk.Label(label='検査完了日時（検出ありは太字）', xalign=0))
+        left.append(Gtk.Label(label='検査完了日時（要確認は太字）', xalign=0))
         self.history_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.history_list.update_property([Gtk.AccessibleProperty.LABEL], ['検査完了日時一覧'])
         self.history_list.connect('row-selected', self.log_selected)
@@ -116,8 +117,8 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         body.set_position(215)
         body.set_shrink_start_child(False)
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_start=12)
-        right.append(Gtk.Label(label='選択した検査のログ', xalign=0))
-        self.result = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        right.append(Gtk.Label(label='選択した検査の結果', xalign=0))
+        self.result = ReportPane()
         self.result.update_property([Gtk.AccessibleProperty.LABEL], ['選択した日時の検査ログ'])
         scroll = Gtk.ScrolledWindow(vexpand=True, hexpand=True)
         scroll.set_child(self.result)
