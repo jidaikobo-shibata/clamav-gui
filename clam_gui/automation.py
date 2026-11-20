@@ -150,6 +150,7 @@ class Media:
 class Automation:
     # Repeated clamscan database loading is expensive. Batch queued arrivals and
     # leave time for foreground work even after a long-running scan finishes.
+    MEDIA_LIMIT = 32
     START_INTERVAL = 15
     REST_INTERVAL = 2
 
@@ -215,7 +216,7 @@ class Automation:
             return
         if medium.token in self.media_seen and not force:
             return
-        if len(self.media_pending) >= 32:
+        if len(self.media_pending) >= self.MEDIA_LIMIT:
             self.warn(MEDIA_ID, media_plan(), '外部メディアの検査待ちが上限に達しました。接続済みメディアを手動で検査してください。')
             return
         self.media_pending.append(medium.token)
@@ -254,6 +255,17 @@ class Automation:
                 continue  # Preserve newer events and their quiet periods.
             if not self.queue.put(key, self.plans[key], item.path, restore=True):
                 self.warn(key, self.plans[key], '検査待ちが上限に達し、再試行対象の一部を保持できません。フォルダー全体を検査してください。')
+
+    def restore_media(self, medium):
+        if (self.closed or self.cancel.is_set() or not self.media_enabled or
+                not medium.available() or medium.token in self.media_pending):
+            return
+        # One failed in-flight request can return after 32 new mounts arrive.
+        # Reserve that one slot while keeping new arrivals capped at 32.
+        if len(self.media_pending) >= self.MEDIA_LIMIT + 1:
+            self.warn(MEDIA_ID, media_plan(), '外部メディアの再試行待ちが上限に達しました。接続済みメディアを手動で検査してください。')
+            return
+        self.media_pending.insert(0, medium.token)
 
     def tick(self, blocked=False):
         if self.closed or self.active or blocked or self.clock() < self.next_start:
@@ -300,8 +312,8 @@ class Automation:
                 self.next_start = max(self.next_start, self.clock() + self.REST_INTERVAL)
                 self.active, self.active_key, self.active_media = False, None, None
                 if retry and not self.closed:
-                    if medium and self.media_enabled and medium.available():
-                        self.media_pending.insert(0, medium.token)
+                    if medium:
+                        self.restore_media(medium)
                     elif key in self.plans:
                         self.restore_batch(key, batch)
                 elif not retry:
@@ -323,6 +335,12 @@ class Automation:
         except Exception as error:
             self.next_start = max(self.next_start, self.clock() + self.REST_INTERVAL)
             self.active, self.active_key, self.active_media = False, None, None
+            # No scanner ran: retain the request before reporting the failure.
+            # Both helpers honor current scope, cancellation and bounded capacity.
+            if medium:
+                self.restore_media(medium)
+            else:
+                self.restore_batch(key, batch)
             from .core import record_scan_failure
             status, output = record_scan_failure(self.store, plan, error, key)
             self.finished(key, status, output, plan.label)

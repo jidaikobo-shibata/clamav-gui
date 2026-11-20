@@ -189,3 +189,96 @@ class BatchRecoveryTests(unittest.TestCase):
         self.scanner.side_effect=ScanBusyError('busy')
         self.finish_job(before_done=self.engine.close)
         self.assertFalse(self.engine.queue.pending);self.assertFalse(self.engine.queue.deferred)
+
+    def fail_start(self, target='clam_gui.automation.threading.Thread.start', before_failure=None):
+        def failure(*args,**kwargs):
+            if before_failure:before_failure()
+            raise RuntimeError('temporary worker startup failure')
+        with patch('shutil.which',return_value='/synthetic/clamscan'),patch(target,side_effect=failure):
+            self.engine.tick()
+        self.assertFalse(self.engine.active);self.assertIsNone(self.engine.active_key)
+        self.scanner.assert_not_called()
+
+    def test_worker_construction_failure_preserves_files_and_retries_after_rest(self):
+        self.fail_start('clam_gui.automation.threading.Thread')
+        self.assertEqual(len(self.engine.queue.pending),2)
+        self.assertEqual(len(self.store.recent()),1)
+        with patch('shutil.which',return_value='/synthetic/clamscan'),patch('clam_gui.automation.threading.Thread') as thread:
+            self.engine.tick();thread.assert_not_called()
+        self.now=200;self.scanner.return_value=(ScanStatus('検査完了',ResultKind.CLEAN),'synthetic')
+        self.finish_job()
+        self.assertEqual(len(self.engine.queue.completed),2)
+        self.assertFalse(self.engine.queue.pending)
+
+    def test_worker_start_failure_retains_batch_when_arrivals_fill_queue(self):
+        self.engine.queue.limit=2
+        self.fail_start(before_failure=self.fill_new_arrivals)
+        self.assertEqual(len(self.engine.queue.pending),2)
+        self.assertEqual(len(self.engine.queue.deferred),2)
+        self.now=200
+        self.fail_start(before_failure=self.fill_new_arrivals)
+        self.assertEqual(len(self.engine.queue.pending),2)
+        self.assertEqual(len(self.engine.queue.deferred),2)
+        self.now=300;self.scanner.return_value=(ScanStatus('検査完了',ResultKind.CLEAN),'synthetic')
+        self.finish_job()
+        self.assertEqual(len(self.engine.queue.completed),4)
+        self.assertFalse(self.engine.queue.pending);self.assertFalse(self.engine.queue.deferred)
+
+    def test_start_failure_does_not_restore_files_after_stop(self):
+        self.fail_start(before_failure=self.engine.close)
+        self.assertFalse(self.engine.queue.pending);self.assertFalse(self.engine.queue.deferred)
+
+    def test_start_failure_revalidates_changed_scope_and_survives_history_failure(self):
+        def exclude_one():
+            self.engine.configure([('p',replace(self.plan,excludes=[str(self.gone)]))],False)
+        with patch.object(self.store,'save',side_effect=OSError('cannot save history')):
+            self.fail_start(before_failure=exclude_one)
+        self.assertEqual(set(self.engine.queue.pending),{('p',str(self.survivor))})
+        self.assertIn('cannot save history',self.results[-1][1])
+        self.now=200;self.scanner.return_value=(ScanStatus('検査完了',ResultKind.CLEAN),'synthetic')
+        self.finish_job()
+        self.assertEqual(self.scanner.call_args.kwargs['files'],[str(self.survivor)])
+
+    def queue_media(self):
+        from clam_gui.automation import Media
+        self.engine.configure([],True)
+        info=self.folder.stat()
+        medium=Media('first',str(self.folder),'first',(info.st_dev,info.st_ino))
+        self.engine.add_media(medium)
+        return medium
+
+    def test_media_start_failure_requeues_once_and_can_later_complete(self):
+        medium=self.queue_media()
+        self.fail_start();self.assertEqual(self.engine.media_pending,['first'])
+        self.assertIsNone(self.engine.active_media)
+        self.now=200;self.fail_start();self.assertEqual(self.engine.media_pending,['first'])
+        self.now=300;self.scanner.return_value=(ScanStatus('検査完了',ResultKind.CLEAN),'synthetic')
+        self.finish_job()
+        self.assertTrue(self.scanner.call_args.kwargs['available']())
+        self.assertEqual(self.engine.media_pending,[])
+
+    def test_removed_media_is_not_restored_after_start_failure(self):
+        medium=self.queue_media()
+        self.fail_start(before_failure=lambda:self.engine.remove_media(medium.token))
+        self.assertFalse(medium.available());self.assertFalse(self.engine.media_pending)
+
+    def test_disabled_media_is_not_restored_after_start_failure(self):
+        self.queue_media()
+        self.fail_start(before_failure=lambda:self.engine.configure([],False))
+        self.assertFalse(self.engine.media_pending)
+
+    def test_media_start_failure_reserves_one_slot_when_new_mounts_fill_queue(self):
+        from clam_gui.automation import Media
+        first=self.queue_media();self.engine.MEDIA_LIMIT=2
+        def arrivals():
+            for token in ('new-a','new-b'):
+                self.engine.add_media(Media(token,first.path,token,first.device))
+        self.fail_start(before_failure=arrivals)
+        self.assertEqual(self.engine.media_pending,['first','new-a','new-b'])
+        self.engine.add_media(Media('overflow',first.path,'overflow',first.device))
+        self.assertEqual(len(self.engine.media_pending),3)
+        self.assertIn('上限',self.engine.errors['external-media'])
+        self.now=200;self.scanner.return_value=(ScanStatus('検査完了',ResultKind.CLEAN),'synthetic')
+        self.finish_job()
+        self.assertEqual(self.scanner.call_args.args[0].label,'外部メディア検査：first')
+        self.assertEqual(self.engine.media_pending,['new-a','new-b'])
