@@ -184,6 +184,13 @@ class Automation:
             self.changed()
             self.finished(key, status, message, plan.label)
 
+    def forget_subtree(self, key, path):
+        root = Path(path)
+        for mapping in (self.queue.pending, self.queue.completed):
+            for ident in list(mapping):
+                if ident[0] == key and (Path(ident[1]) == root or root in Path(ident[1]).parents):
+                    mapping.pop(ident, None)
+
     def file_event(self, key, path):
         plan = self.plans.get(key)
         if plan and not self.queue.put(key, plan, path, changed=True):

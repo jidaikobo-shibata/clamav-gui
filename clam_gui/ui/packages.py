@@ -5,6 +5,7 @@ import threading
 import time
 from gi.repository import GLib, Gtk
 from ..definitions import AutoUpdateState
+from ..jobs import start_worker
 
 
 class PackageWindow:
@@ -33,7 +34,11 @@ class PackageWindow:
                     self.show_auto_status(status)
                 return False
             GLib.idle_add(finished)
-        threading.Thread(target=worker, daemon=True).start()
+        def failed(error):
+            self.auto_checking = False
+            self.auto_checked_at = time.monotonic()
+            self.show_auto_status(AutoUpdateState(detail='状態確認を開始できませんでした：' + str(error)))
+        start_worker(worker, failed)
 
     def package_setup(self, manager=None, updater=None, update_only=False, auto_manager=None):
         manager = manager or self.backend.packages()
@@ -153,7 +158,11 @@ class PackageWindow:
                         refresh.set_sensitive(True)
                     return False
                 GLib.idle_add(finished)
-            threading.Thread(target=worker, daemon=True).start()
+            def failed(error):
+                if not state['closed']:
+                    status.set_text('状態確認を開始できませんでした：' + str(error))
+                    refresh.set_sensitive(True)
+            start_worker(worker, failed)
         def release():
             state['running'] = False
             state['updating'] = False
@@ -165,6 +174,11 @@ class PackageWindow:
             progress.stop()
             close.set_sensitive(True)
             buttons()
+        def failed_operation(error):
+            release()
+            output.get_buffer().set_text(str(error))
+            message.set_text('処理を開始できませんでした。状態を再確認して再実行してください。')
+
         def execute(plan, confirmation):
             confirmation.destroy()
             message.set_text('管理者認証後に処理します。ダウンロードやパッケージ処理の完了までお待ちください。')
@@ -190,7 +204,7 @@ class PackageWindow:
                         message.set_text(result + '\n自動更新の状態を確認し、無効ならスイッチで有効にしてください。')
                     return False
                 GLib.idle_add(finished)
-            threading.Thread(target=worker, daemon=True).start()
+            start_worker(worker, failed_operation)
         def confirm(plan):
             confirmation = Gtk.Window(application=self, title='ClamAVの変更内容を確認', transient_for=window, modal=True)
             confirmation.set_default_size(700, 550)
@@ -259,7 +273,7 @@ class PackageWindow:
                         confirm(plan)
                     return False
                 GLib.idle_add(finished)
-            threading.Thread(target=worker, daemon=True).start()
+            start_worker(worker, failed_operation)
         def change_auto(_switch, enabled):
             if state['setting_switch']:
                 return True
@@ -296,7 +310,7 @@ class PackageWindow:
                         check_state()
                         return False
                     GLib.idle_add(finished)
-                threading.Thread(target=worker, daemon=True).start()
+                start_worker(worker, failed_operation)
             dialog.connect('response', response)
             dialog.present()
             return True
@@ -342,7 +356,7 @@ class PackageWindow:
                         check_state()
                         return False
                     GLib.idle_add(finished)
-                threading.Thread(target=worker, daemon=True).start()
+                start_worker(worker, failed_operation)
             dialog.connect('response', response)
             dialog.present()
         update.connect('clicked', lambda _: begin_update())

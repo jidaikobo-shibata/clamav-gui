@@ -5,7 +5,6 @@ import json
 import uuid
 import os
 import re
-import tempfile
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -17,6 +16,7 @@ from .execution import ScanBusyError, ScanAlreadyQueued, lane_for, lock_path as 
 from .runtime import track_scan
 from .platforms import get_backend
 from .settings import Preferences
+from .scan_output import ScanOutput
 from .results import ResultKind, ScanStatus, assess, has_detection, warning_signature, summarize
 from .mailboxes import MAILBOX_NOTE, mailbox_findings, mailbox_guidance
 from .options import DEFAULTS, supported_options, option_arguments, describe_options, LIMITS, validate_limits, limit_arguments, describe_limits
@@ -82,7 +82,10 @@ class Store:
         result = assess(status, output)
         encoded = output.encode('utf-8')
         if len(encoded) > 2 * 1024 * 1024:
-            output = '出力が大きいため末尾のみ保存しています。\n' + encoded[-2*1024*1024:].decode('utf-8', errors='replace')
+            marker, separator = '出力が大きいため先頭と末尾のみ保存しています。\n', '\n…\n'
+            budget = 2*1024*1024 - len((marker + separator).encode('utf-8'))
+            output = (marker + encoded[:384*1024].decode('utf-8', errors='ignore') + separator +
+                      encoded[-(budget-384*1024):].decode('utf-8', errors='ignore'))
         size = len((target + status + output).encode('utf-8')) + 128
         policy = self.automation_settings()
         completed = datetime.datetime.now().astimezone()
@@ -357,6 +360,26 @@ def record_scan_failure(store, plan, error, profile_id=None, started=None):
     return status, output
 
 
+def storage_warning(status, output, error):
+    result = assess(status, output)
+    detail = '検査履歴を保存できませんでした：' + str(error)
+    kind = ResultKind.CANCELLED if result.kind == ResultKind.CANCELLED else ResultKind.INCOMPLETE
+    title = ('検出あり・履歴保存失敗' if result.detected else
+             '検査中止・履歴保存失敗' if kind == ResultKind.CANCELLED else
+             '検査不完了：履歴を保存できませんでした')
+    return (ScanStatus(title + '\n' + str(status) + '\n' + detail, kind, result.detected,
+                       started_at=getattr(status, 'started_at', None)),
+            output + '\n履歴保存エラー：' + str(error))
+
+
+def persist_result(store, plan, started, status, output, profile_id):
+    try:
+        store.save(started, plan.describe(), status, output, profile_id)
+    except Exception as error:
+        return storage_warning(status, output, error)
+    return status, output
+
+
 def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None, available=None, wait=False, can_start=None):
     plan = target if isinstance(target, Plan) else Plan('フォルダー検査', [Path(target).absolute()], [])
     plan = store.effective_plan(plan)
@@ -378,6 +401,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
     lock_path = Path(lock_path) if lock_path else default_lock_path(lane)
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = get_backend().lock(lock_path)
+    result_ready = False
     try:
         with track_scan(store, profile_id, started, phase='waiting' if wait else 'running', lane=lane,
                         deduplicate=True) as running:
@@ -391,8 +415,9 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                     reason = '予定が無効になったかプランが変更されたため、検査待ちを取り消しました。'
                 if reason:
                     status = ScanStatus(reason, ResultKind.CANCELLED, started_at=datetime.datetime.now().astimezone().isoformat(timespec='seconds'))
-                    store.save(started, plan.describe(), status, reason, profile_id)
-                    return status, reason
+                    result_ready = True
+                    status, output = persist_result(store, plan, started, status, reason, profile_id)
+                    return status, output
                 if (not wait or running.is_next()) and lock.acquire():
                     break
                 if not wait:
@@ -417,8 +442,9 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             command += ['--exclude-dir=^' + re.escape(os.path.normpath(str(p))) + r'(/|$)'
                         for p in plan.excluded_dirs]
             command += ['--'] + [str(p) for p in (files if files is not None else plan.targets)]
-            # A temporary file avoids pipe deadlocks and unbounded in-memory output.
-            with tempfile.TemporaryFile() as log:
+            # Drain the pipe while scanning; neither disk output nor memory grows unbounded.
+            with ScanOutput() as log:
+                process = None
                 try:
                     process = get_backend().spawn_scanner(command, lock=lock, stdout=log, stderr=subprocess.STDOUT,
                                                env={**os.environ, 'LC_ALL': 'C'})
@@ -439,18 +465,29 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                                     process.kill()
                                     code = process.wait()
                                 break
-                    size = log.seek(0, 2)
-                    log.seek(max(0, size - 2 * 1024 * 1024))
-                    output = log.read().decode('utf-8', errors='replace')
-                    if size > 2 * 1024 * 1024:
-                        output = 'WARNING: 出力が大きいため末尾2 MiBのみ保存しています。\n' + output
+                    output = log.finish()
                     status = summarize(code, output, cancelled)
+                    if log.detected and not status.assessment.detected:
+                        status = ScanStatus(str(status), status.assessment.kind, True)
+                        status += '\n脅威の検出がありました。省略された出力があるため詳細をすべて表示できません。'
                     if removed or (available is not None and not available()):
                         status = ScanStatus('検査不完了：検査対象のメディアが取り外されました。', ResultKind.INCOMPLETE, has_detection(status, output))
                     if files is not None:
                         output += '\n\n--- 監視による検査ファイル ---\n' + '\n'.join(map(str, files))
-                except OSError as error:
-                    status, output = ScanStatus('検査不完了：ClamAVを実行できませんでした', ResultKind.INCOMPLETE), str(error)
+                except Exception as error:
+                    if process is not None:
+                        try:
+                            if process.poll() is None:
+                                process.terminate()
+                                try:
+                                    process.wait(timeout=3)
+                                except subprocess.TimeoutExpired:
+                                    process.kill()
+                                    process.wait()
+                        except OSError:
+                            pass
+                    output = log.finish() + '\nClamAVの実行エラー：' + str(error)
+                    status = ScanStatus('検査不完了：ClamAVを実行できませんでした', ResultKind.INCOMPLETE, log.detected)
             findings = mailbox_findings(output, plan.targets)
             if findings:
                 status += f'\n{MAILBOX_NOTE}（検出された保存ファイル：{len(findings)}件）'
@@ -462,7 +499,12 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             output += '\n検査上限の警告・ヒューリスティック警告: 有効（固定）\n'
             result = assess(status, output)
             status = ScanStatus(str(status), result.kind, result.detected, started_at=started)
-            store.save(started, plan.describe(), status, output, profile_id)
+            result_ready = True
+            status, output = persist_result(store, plan, started, status, output, profile_id)
             return status, output
+    except sqlite3.Error as error:
+        if not result_ready:
+            raise
+        return storage_warning(status, output, error)
     finally:
         lock.close()

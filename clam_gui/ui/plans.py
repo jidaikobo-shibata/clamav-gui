@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 from gi.repository import GLib, Gtk
 from ..core import Plan
+from ..jobs import start_worker
 from ..schedule import Schedule, read_schedule
 
 
@@ -62,7 +63,12 @@ class PlanEditor:
                     self.show_notice(message)
                     return False
                 GLib.idle_add(finished)
-            threading.Thread(target=worker, daemon=True).start()
+            def failed(error):
+                self.busy = False
+                self.new_action.set_enabled(True)
+                self.set_controls(True)
+                self.show_notice('削除処理を開始できませんでした：' + str(error))
+            start_worker(worker, failed)
         dialog.connect('response', response)
         dialog.present()
 
@@ -243,7 +249,13 @@ class PlanEditor:
                             editor.destroy()
                         return False
                     GLib.idle_add(finished)
-                threading.Thread(target=worker, daemon=True).start()
+                def failed(error):
+                    state['running'] = False
+                    self.busy = False
+                    self.set_controls(True)
+                    box.set_sensitive(True)
+                    error_label.set_text('保存処理を開始できませんでした：' + str(error))
+                start_worker(worker, failed)
             dialog.connect('response', response)
             dialog.present()
         save.connect('clicked', save_profile)

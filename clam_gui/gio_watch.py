@@ -184,15 +184,26 @@ class Observers:
                 return True
         return True
 
+    def discard_subtree(self, key, path):
+        self.engine.forget_subtree(key, path)
+        def inside(directory):
+            return Path(directory) == Path(path) or Path(path) in Path(directory).parents
+        for ident in list(self.monitors):
+            if ident[0] == key and inside(ident[1]):
+                self.monitors.pop(ident).cancel()
+        if self.current and self.current[0] == key and inside(self.current[1]):
+            self.finish_directory()
+        self.tasks = deque(task for task in self.tasks if not (task[0] == key and inside(task[1])))
+        self.queued = {ident for ident in self.queued if not (ident[0] == key and inside(ident[1]))}
+
     def event(self, monitor, file, other, event, key):
         plan = self.plans.get(key)
         if not plan:
             return
         if event in (Gio.FileMonitorEvent.DELETED, Gio.FileMonitorEvent.MOVED_OUT):
             path = file.get_path()
-            for ident in list(self.monitors):
-                if ident[0] == key and path and (Path(ident[1]) == Path(path) or Path(path) in Path(ident[1]).parents):
-                    self.monitors.pop(ident).cancel()
+            if path:
+                self.discard_subtree(key, path)
             if path == plan.targets[0]:
                 self.engine.warn(key, plan, '監視フォルダーが見つかりません。自動で再試行します。')
             return
@@ -200,6 +211,8 @@ class Observers:
                          Gio.FileMonitorEvent.CHANGES_DONE_HINT, Gio.FileMonitorEvent.RENAMED,
                          Gio.FileMonitorEvent.MOVED_IN):
             return
+        if event == Gio.FileMonitorEvent.RENAMED and file.get_path():
+            self.discard_subtree(key, file.get_path())
         target = other if event == Gio.FileMonitorEvent.RENAMED and other else file
         path = target.get_path()
         if not path or not allowed_path(plan, path):

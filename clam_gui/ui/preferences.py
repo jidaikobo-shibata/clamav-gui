@@ -5,6 +5,7 @@ import threading
 import shutil
 from gi.repository import GLib, Gtk
 from ..core import engine_status
+from ..jobs import start_worker
 from ..options import OPTIONS, supported_options, standard_defaults, option_arguments, LIMITS, limit_arguments
 from ..retention import validate as validate_automation
 from ..background import enabled as background_enabled, heartbeat
@@ -67,7 +68,11 @@ class PreferencesWindow:
                             ('常駐監視を有効にしました。起動状態は数秒後に反映されます。' if enable else '常駐監視を無効にしました。'))
                         return False
                     GLib.idle_add(done)
-                threading.Thread(target=worker, daemon=True).start()
+                def failed(error):
+                    self.schedule_busy = False
+                    refresh()
+                    state.set_text('設定の変更処理を開始できませんでした：' + str(error))
+                start_worker(worker, failed)
             dialog.connect('response', response)
             dialog.present()
         control.connect('clicked', lambda _: change(not background_enabled(self.store)))
@@ -271,4 +276,4 @@ class PreferencesWindow:
                 return False
             GLib.idle_add(finish)
         window.present()
-        threading.Thread(target=check_support, daemon=True).start()
+        start_worker(check_support, lambda error: state.set_text('対応項目の確認を開始できませんでした：' + str(error)))

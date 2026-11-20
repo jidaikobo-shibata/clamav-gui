@@ -16,3 +16,14 @@ def execute_scan(plan, store, cancel=None, *, scanner=None, failure=None, **kwar
             # Even a malformed plan or a failing failure reporter must reach completion.
             status = ScanStatus('検査不完了：' + str(error) + '\n検査履歴も保存できませんでした：' + str(storage_error), ResultKind.INCOMPLETE)
             return status, str(error) + '\n履歴保存エラー：' + str(storage_error)
+
+
+def start_worker(target, failed):
+    """Report thread construction/start failures synchronously on the UI thread."""
+    import threading
+    try:
+        threading.Thread(target=target, daemon=True).start()
+    except Exception as error:
+        failed(error)
+        return False
+    return True

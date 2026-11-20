@@ -8,7 +8,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gio, GLib, Gtk, Pango
 from .core import Store, scan, record_scan_failure
-from .jobs import execute_scan
+from .jobs import execute_scan, start_worker
 from .execution import ScanAlreadyQueued
 from .schedule import Schedule, read_schedule, read_schedules
 from .automation import Automation, MEDIA_ID, media_plan
@@ -420,7 +420,11 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
                     self.poll_plans()
                     return False
                 GLib.idle_add(finished)
-            threading.Thread(target=worker, daemon=True).start()
+            def failed(error):
+                self.schedule_busy = False
+                self.show_notice('予定の変更処理を開始できませんでした：' + str(error))
+                self.poll_plans()
+            start_worker(worker, failed)
         if enabled and not saved.enabled:
             watching = widgets['plan'].kind == 'watch'
             dialog = Gtk.MessageDialog(transient_for=self.window, modal=True,

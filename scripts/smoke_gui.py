@@ -183,6 +183,31 @@ def check():
     settle_history()
     assert len(app.log_entries) == 2
     assert app.add_plan_button.get_action_name() == 'app.new-target'
+    # Failure to create a worker must release the editor and normal quit path.
+    app.edit_profile(key, plan)
+    failed_editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+    fields = list(descendants(failed_editor))
+    enable = next(w for w in fields if isinstance(w, Gtk.CheckButton) and w.get_label() == '定期検査を有効にする')
+    enable.set_active(True)
+    save_failed = next(w for w in fields if isinstance(w, Gtk.Button) and w.get_label() == '検査プランを保存')
+    save_failed.emit('clicked')
+    dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+    with patch('clam_gui.ui.plans.threading.Thread') as thread:
+        thread.return_value.start.side_effect = RuntimeError('synthetic worker startup failure')
+        dialog.response(Gtk.ResponseType.OK)
+    assert not app.busy and not app.on_close(None)
+    assert save_failed.is_sensitive()
+    assert any(isinstance(w, Gtk.Label) and '保存処理を開始できませんでした' in w.get_text() for w in fields)
+    failed_editor.close()
+    assert not failed_editor.get_visible()
+    # The schedule-switch path has a separate busy flag and must also recover.
+    app.toggle_schedule(key, True)
+    dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+    with patch('clam_gui.__main__.threading.Thread') as thread:
+        thread.return_value.start.side_effect = RuntimeError('synthetic schedule startup failure')
+        dialog.response(Gtk.ResponseType.OK)
+    assert not app.schedule_busy and not app.on_close(None)
+    assert '開始できませんでした' in app.notice.get_text()
     # Adding from the manager must not save on cancel.
     count = len(app.store.profiles())
     app.add_plan_button.emit('clicked')

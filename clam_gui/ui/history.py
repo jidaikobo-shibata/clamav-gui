@@ -16,6 +16,13 @@ class HistoryController:
         self.latest_requested = False
         self.reader = LatestReader(GLib.idle_add)
 
+    def read(self, load, done):
+        try:
+            self.reader.submit(load, done)
+        except Exception as error:
+            self.loading = False
+            self.text.get_buffer().set_text('履歴の読込みを開始できませんでした：' + str(error))
+
     def reload(self, selected, *, latest=False):
         self.latest_requested = latest or (self.latest_requested and selected == self.selected)
         old = self.listing.get_selected_row()
@@ -26,10 +33,10 @@ class HistoryController:
         self.loading = True
         self.selected = selected
         if not selected:
-            self.reader.submit(lambda: [], lambda rows, error: self._headers(rows, error, None))
+            self.read(lambda: [], lambda rows, error: self._headers(rows, error, None))
             return
         key, plan = selected
-        self.reader.submit(lambda: self.store.history_headers(key, plan), lambda rows, error: self._headers(rows, error, old_id))
+        self.read(lambda: self.store.history_headers(key, plan), lambda rows, error: self._headers(rows, error, old_id))
 
     def _headers(self, entries, error, old_id):
         self.loading = True
@@ -71,7 +78,7 @@ class HistoryController:
         self.shown = None
         self.text.get_buffer().set_text('ログを読み込んでいます…')
         key, plan = self.selected
-        self.reader.submit(lambda: self.store.history_entry(ident, key, plan), self._body)
+        self.read(lambda: self.store.history_entry(ident, key, plan), self._body)
 
     def _body(self, entry, error):
         self.shown = entry.id if entry else None
