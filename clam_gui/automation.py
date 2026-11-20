@@ -222,7 +222,7 @@ class Automation:
         self.media_pending.append(medium.token)
         self.media_seen.add(medium.token)
 
-    def remove_media(self, token):
+    def remove_media(self, token, *, reason=None):
         medium = self.media.pop(token, None)
         waiting = token in self.media_pending
         if medium:
@@ -233,7 +233,8 @@ class Automation:
             from dataclasses import replace
             from .core import record_scan_failure
             plan = replace(media_plan(), label='外部メディア検査：' + medium.label, targets=[medium.path])
-            status, output = record_scan_failure(self.store, plan, ValueError('検査待ちのメディアが取り外されたため、検査を開始できませんでした。'), MEDIA_ID)
+            reason = reason or '検査待ちのメディアが取り外されたため、検査を開始できませんでした。'
+            status, output = record_scan_failure(self.store, plan, ValueError(reason), MEDIA_ID)
             self.finished(MEDIA_ID, status, output, plan.label)
         # The active job keeps its Medium object and detects its removal itself.
 
@@ -275,9 +276,15 @@ class Automation:
             return  # Retain the bounded queue until the engine becomes available.
         medium = None
         while self.media_pending:
-            token = self.media_pending.pop(0)
+            token = self.media_pending[0]
             candidate = self.media.get(token)
-            if self.media_enabled and candidate and candidate.available():
+            if self.media_enabled and candidate and not candidate.available():
+                # Remove/report while the request is still marked as waiting.
+                # A later GIO removal event then cannot report it a second time.
+                self.remove_media(token, reason='検査待ちのメディアが取り外されたか利用できなくなったため、検査を開始できませんでした。')
+                continue
+            self.media_pending.pop(0)
+            if self.media_enabled and candidate:
                 medium = candidate
                 break
         batch = []

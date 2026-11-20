@@ -282,3 +282,58 @@ class BatchRecoveryTests(unittest.TestCase):
         self.finish_job()
         self.assertEqual(self.scanner.call_args.args[0].label,'外部メディア検査：first')
         self.assertEqual(self.engine.media_pending,['new-a','new-b'])
+
+    def test_unavailable_media_is_reported_before_late_removal_event(self):
+        medium=self.queue_media()
+        self.folder.rename(self.root/'detached')
+        with patch('shutil.which',return_value='/synthetic/clamscan'):self.engine.tick()
+        self.assertFalse(self.engine.media_pending);self.scanner.assert_not_called()
+        self.assertFalse(medium.present)
+        self.assertEqual(len(self.results),1);self.assertEqual(len(self.store.recent()),1)
+        self.assertIn('検査を開始できませんでした',self.results[0][1])
+        self.assertFalse(self.results[0][1].assessment.completed)
+        self.engine.remove_media(medium.token)
+        with patch('shutil.which',return_value='/synthetic/clamscan'):self.engine.tick()
+        self.assertEqual(len(self.results),1);self.assertEqual(len(self.store.recent()),1)
+
+    def test_removal_event_before_tick_is_also_reported_exactly_once(self):
+        medium=self.queue_media()
+        self.folder.rename(self.root/'detached')
+        self.engine.remove_media(medium.token)
+        with patch('shutil.which',return_value='/synthetic/clamscan'):self.engine.tick()
+        self.engine.remove_media(medium.token)
+        self.assertEqual(len(self.results),1);self.assertEqual(len(self.store.recent()),1)
+        self.scanner.assert_not_called()
+
+    def test_reused_mount_path_reports_old_request_and_scans_new_device(self):
+        from clam_gui.automation import Media
+        first=self.queue_media()
+        self.folder.rename(self.root/'detached');self.folder.mkdir()
+        info=self.folder.stat()
+        second=Media('second',str(self.folder),'second',(info.st_dev,info.st_ino))
+        self.engine.add_media(second)
+        self.scanner.return_value=(ScanStatus('検査完了',ResultKind.CLEAN),'synthetic')
+        self.finish_job()
+        self.assertFalse(first.present);self.assertTrue(second.available())
+        self.assertEqual(len(self.results),2)
+        self.assertIn('検査を開始できませんでした',self.results[0][1])
+        self.assertTrue(self.results[1][1].assessment.clean)
+        self.assertEqual(self.scanner.call_args.args[0].label,'外部メディア検査：second')
+        self.assertFalse(self.engine.media_pending)
+        self.engine.remove_media('first');self.assertEqual(len(self.results),2)
+
+    def test_unavailable_media_history_failure_does_not_block_other_watch_job(self):
+        medium=self.queue_media()
+        healthy=self.root/'healthy';healthy.mkdir();file=healthy/'file';file.touch()
+        self.engine.configure([('p',replace(self.plan,targets=[str(healthy)]))],True)
+        self.engine.file_event('p',str(file))
+        self.folder.rename(self.root/'detached')
+        self.scanner.return_value=(ScanStatus('検査完了',ResultKind.CLEAN),'synthetic')
+        with patch.object(self.store,'save',side_effect=OSError('cannot save history')):
+            self.finish_job()
+        self.assertEqual(len(self.results),2)
+        self.assertIn('検査を開始できませんでした',self.results[0][1])
+        self.assertIn('cannot save history',self.results[0][1])
+        self.assertEqual(self.scanner.call_args.kwargs['files'],[str(file)])
+        self.assertIn(('p',str(file)),self.engine.queue.completed)
+        self.engine.remove_media(medium.token);self.assertEqual(len(self.results),2)
