@@ -97,3 +97,38 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report.title, '要確認・内訳不明')
         self.assertIn('中止', report.description)
         self.assertIn('未検査', report.action)
+
+    def test_application_execution_error_preserves_full_reason(self):
+        reason = '[Errno 13] Permission denied: /example/clamscan'
+        report = build_report(entry('ClamAVの実行エラー：' + reason,
+                                    '検査不完了：ClamAVを実行できませんでした'))
+        self.assertEqual(report.groups[0].title, 'ClamAVの実行エラー')
+        self.assertEqual(report.groups[0].examples[0].detail, reason)
+        self.assertEqual(report.groups[0].examples[0].path, '')
+        self.assertIn('実行権限', report.action)
+        self.assertFalse(report.detections)
+
+    def test_storage_error_with_detection_keeps_detection_and_distinct_count(self):
+        report = build_report(entry('/example/eicar: Test FOUND\nTotal errors: 0\n'
+                                    '履歴保存エラー：database is locked: /example/history.sqlite3', detected=1))
+        self.assertEqual(report.title, '検出あり・検査不完了')
+        self.assertEqual(report.detections[0].count, 1)
+        group = report.groups[0]
+        self.assertEqual(group.title, '履歴保存エラー')
+        self.assertEqual(group.examples[0].detail, 'database is locked: /example/history.sqlite3')
+        self.assertIn('空き容量', group.action)
+        self.assertIn('コピー', group.action)
+        self.assertIn('エラー明細は0件', report.coverage)
+
+    def test_storage_error_alone_does_not_require_rescan(self):
+        report = build_report(entry('履歴保存エラー：No space left on device'))
+        self.assertIn('保存先', report.action)
+        self.assertNotIn('再検査', report.action)
+
+    def test_application_errors_are_bounded_and_not_signature_or_file_paths(self):
+        report = build_report(entry('ClamAVの実行エラー：message FOUND\n' * 150 +
+                                    '/example/履歴保存エラー：file: Permission denied ERROR\n'))
+        self.assertFalse(report.detections)
+        self.assertEqual(report.groups[0].count, 150)
+        self.assertEqual(len(report.groups[0].examples), PREVIEW_LIMIT)
+        self.assertEqual(report.groups[1].title, '権限不足')

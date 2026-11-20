@@ -45,6 +45,8 @@ GROUPS={
     'encrypted':('暗号化されている対象','必要な対象か確認し、内容を検査できる状態にして再検査してください。'),
     'macros':('マクロの警告','マクロが必要な文書か、入手元と用途を確認してください。'),
     'broken':('破損などの警告','対象ファイルが正しく取得できているか確認してください。'),
+    'execution':('ClamAVの実行エラー','ClamAVの導入状態・実行権限・実行環境を確認してから再検査してください。'),
+    'storage':('履歴保存エラー','履歴の保存先の空き容量・書込み権限・利用状態を確認してください。検査結果を失わないよう、保持した詳細ログをコピーしてください。'),
     'engine':('ClamAV本体のエラー','エラーに記載された定義ファイル・設定・読み取り権限などを確認してから再検査してください。'),
     'permission':('権限不足','対象ファイルの読み取り権限や保存場所を確認してください。'),
     'missing':('検査中に消失した対象','一時ファイルなら更新中の可能性があります。必要な対象が残っていれば再検査してください。'),
@@ -75,7 +77,14 @@ def build_report(entry):
     """Counts describe retained lines unless explicitly labelled as ClamAV totals."""
     counts=Counter();examples={key:[] for key in GROUPS};detections=[];detected_count=0
     skips=Counter();error_lines=0;missing_details=[]
+    app_errors={'ClamAVの実行エラー：':'execution','履歴保存エラー：':'storage'}
     for line in entry.output.splitlines():
+        app_key=next((key for prefix,key in app_errors.items() if line.startswith(prefix)),None)
+        if app_key:
+            counts[app_key]+=1
+            if len(examples[app_key])<PREVIEW_LIMIT:
+                examples[app_key].append(Finding('',line.partition('：')[2].strip()))
+            continue
         if line.endswith(' FOUND'):
             signature=found_signature(line);path=line[:-6].rpartition(': ')[0]
             finding=Finding(path,signature)
@@ -137,6 +146,9 @@ def build_report(entry):
         description='完全に検査できなかった対象、または確認が必要な警告があります。'
         action='理由別の一覧を開き、必要な対象を確認して再検査してください。'
         if not counts:description=entry.status or '詳しい理由が記録されていません。'
+
+    if not (entry.is_detected() or detected_count or uncertain) and set(counts).issubset({'execution','storage'}) and counts:
+        action=' '.join(GROUPS[key][1] for key in ('execution','storage') if counts[key])
 
     if result.kind==ResultKind.CANCELLED:
         if entry.is_detected() or detected_count:
