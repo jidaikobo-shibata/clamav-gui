@@ -66,12 +66,15 @@ class Pending:
 
 
 class WatchQueue:
+    RETRY_LIMIT = 50
+
     def __init__(self, clock=time.monotonic, quiet=3, limit=1000):
         self.clock, self.quiet, self.limit = clock, quiet, limit
         self.pending = {}
+        self.deferred = {}
         self.completed = {}
 
-    def put(self, key, plan, path, *, changed=False):
+    def put(self, key, plan, path, *, changed=False, restore=False):
         path = str(Path(os.path.abspath(path)))
         stamp = signature(path)
         if not stamp or path.lower().endswith(TEMP_SUFFIXES) or not allowed_file(plan, path):
@@ -81,9 +84,13 @@ class WatchQueue:
             self.completed.pop(ident, None)
         if self.completed.get(ident) == stamp:
             return True
-        if ident not in self.pending and len(self.pending) >= self.limit:
-            return False
-        self.pending[ident] = Pending(path, stamp, self.clock() + self.quiet)
+        destination = self.deferred if ident in self.deferred else self.pending
+        if ident not in destination and len(destination) >= (self.RETRY_LIMIT if destination is self.deferred else self.limit):
+            if restore and len(self.deferred) < self.RETRY_LIMIT:
+                destination = self.deferred
+            else:
+                return False
+        destination[ident] = Pending(path, stamp, self.clock() + self.quiet)
         return True
 
     def take(self, plans, maximum=50):
@@ -93,29 +100,33 @@ class WatchQueue:
         # Do not stat files still in their quiet period. At most 64 due entries
         # receive filesystem validation in one tick, including deleted/unsafe files.
         checked = 0
-        for ident, item in list(self.pending.items()):
-            key, path = ident
-            plan = plans.get(key)
-            if not plan:
-                self.pending.pop(ident, None)
-                continue
-            if item.due > now or (chosen is not None and chosen != key):
-                continue
-            checked += 1
-            stamp = signature(path)
-            if not stamp or not allowed_file(plan, path) or self.completed.get(ident) == stamp:
-                self.pending.pop(ident, None)
-            elif stamp != item.signature:
-                item.signature, item.due = stamp, now + self.quiet
-            else:
-                chosen = key
-                batch.append(item)
-                self.pending.pop(ident)
-            if len(batch) == maximum or checked >= 64:
-                break
+        # A bounded reserve protects retries when new arrivals fill pending.
+        # Ready retries go first; quiet-period retries do not block other work.
+        for queue in (self.deferred, self.pending):
+            for ident, item in list(queue.items()):
+                key, path = ident
+                plan = plans.get(key)
+                if not plan:
+                    queue.pop(ident, None)
+                    continue
+                if item.due > now or (chosen is not None and chosen != key):
+                    continue
+                checked += 1
+                stamp = signature(path)
+                if not stamp or not allowed_file(plan, path) or self.completed.get(ident) == stamp:
+                    queue.pop(ident, None)
+                elif stamp != item.signature:
+                    item.signature, item.due = stamp, now + self.quiet
+                else:
+                    chosen = key
+                    batch.append(item)
+                    queue.pop(ident)
+                if len(batch) == maximum or checked >= 64:
+                    return chosen, batch
         return chosen, batch
 
     def retain(self, keys):
+        self.deferred = {ident: value for ident, value in self.deferred.items() if ident[0] in keys}
         self.pending = {ident: value for ident, value in self.pending.items() if ident[0] in keys}
         self.completed = {ident: value for ident, value in self.completed.items() if ident[0] in keys}
 
@@ -186,7 +197,7 @@ class Automation:
 
     def forget_subtree(self, key, path):
         root = Path(path)
-        for mapping in (self.queue.pending, self.queue.completed):
+        for mapping in (self.queue.pending, self.queue.deferred, self.queue.completed):
             for ident in list(mapping):
                 if ident[0] == key and (Path(ident[1]) == root or root in Path(ident[1]).parents):
                     mapping.pop(ident, None)
@@ -228,11 +239,21 @@ class Automation:
     def status(self, key):
         if key in self.errors:
             return self.errors[key]
-        count = len(self.media_pending) if key == MEDIA_ID else sum(ident[0] == key for ident in self.queue.pending)
+        count = len(self.media_pending) if key == MEDIA_ID else sum(ident[0] == key for queue in (self.queue.pending, self.queue.deferred) for ident in queue)
         if count:
             waiting = '（負荷を抑えて待機中）' if self.clock() < self.next_start else ''
             return f'検査待ち：{count}件' + waiting
         return '監視中（アプリ起動中のみ）'
+
+    def restore_batch(self, key, batch):
+        if self.closed or self.cancel.is_set() or key not in self.plans:
+            return
+        for item in batch:
+            ident = key, item.path
+            if ident in self.queue.pending or ident in self.queue.deferred:
+                continue  # Preserve newer events and their quiet periods.
+            if not self.queue.put(key, self.plans[key], item.path, restore=True):
+                self.warn(key, self.plans[key], '検査待ちが上限に達し、再試行対象の一部を保持できません。フォルダー全体を検査してください。')
 
     def tick(self, blocked=False):
         if self.closed or self.active or blocked or self.clock() < self.next_start:
@@ -282,20 +303,14 @@ class Automation:
                     if medium and self.media_enabled and medium.available():
                         self.media_pending.insert(0, medium.token)
                     elif key in self.plans:
-                        for item in batch:
-                            self.queue.put(key, self.plans[key], item.path)
+                        self.restore_batch(key, batch)
                 elif not retry:
-                    if (getattr(status, 'retry_files', False) and not self.closed and
-                            not self.cancel.is_set() and key in self.plans):
-                        # Revalidate against the current plan. Keep newer events
-                        # and their quiet periods instead of overwriting them.
-                        for item in batch:
-                            if (key, item.path) not in self.queue.pending:
-                                if not self.queue.put(key, self.plans[key], item.path):
-                                    self.warn(key, self.plans[key], '検査待ちが1000件を超えました。再試行対象の一部を保持できません。フォルダー全体を検査してください。')
+                    if getattr(status, 'retry_files', False):
+                        self.restore_batch(key, batch)
                     if assess(status, output).completed:
                         for item in batch:
-                            if signature(item.path) == item.signature and (key, item.path) not in self.queue.pending:
+                            if (signature(item.path) == item.signature and (key, item.path) not in self.queue.pending
+                                    and (key, item.path) not in self.queue.deferred):
                                 self.queue.completed[key, item.path] = item.signature
                         # Bound deduplication memory independently of the event queue.
                         while len(self.queue.completed) > 5000:
@@ -315,5 +330,6 @@ class Automation:
     def close(self):
         self.closed = True
         self.queue.pending.clear()
+        self.queue.deferred.clear()
         self.media_pending.clear()
         self.cancel.set()

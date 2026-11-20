@@ -102,3 +102,90 @@ class BatchRecoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             scan(self.plan,self.store,files=[])
         self.assertNotIsInstance(caught.exception,ScanFilesChanged)
+
+    def fill_new_arrivals(self):
+        self.arrivals=[self.folder/('new-'+str(i)) for i in range(2)]
+        for file in self.arrivals:
+            file.touch();self.engine.file_event('p',str(file))
+
+    def busy_full_queue(self):
+        from clam_gui.execution import ScanBusyError
+        self.engine.queue.limit=2
+        self.scanner.side_effect=ScanBusyError('busy')
+        self.finish_job(before_done=self.fill_new_arrivals)
+
+    def test_contention_preserves_original_files_when_new_arrivals_fill_queue(self):
+        self.busy_full_queue()
+        self.assertEqual(set(self.engine.queue.deferred),{('p',str(self.gone)),('p',str(self.survivor))})
+        self.assertEqual(len(self.engine.queue.pending),2)
+        self.assertIn('4件',self.engine.status('p'))
+        self.assertFalse(self.results);self.assertFalse(self.engine.errors)
+        # A new event for a deferred file updates that entry even while pending is full.
+        self.now=101;self.engine.queue.quiet=10
+        self.survivor.write_text('changed while deferred')
+        self.engine.file_event('p',str(self.survivor))
+        self.assertEqual(self.engine.queue.deferred['p',str(self.survivor)].due,111)
+        self.assertNotIn(('p',str(self.survivor)),self.engine.queue.pending)
+        self.now=200;self.scanner.side_effect=None
+        self.scanner.return_value=(ScanStatus('検査完了',ResultKind.CLEAN),'synthetic')
+        self.finish_job()
+        self.assertEqual(set(self.scanner.call_args.kwargs['files']),set(map(str,[self.gone,self.survivor]+self.arrivals)))
+        self.assertFalse(self.engine.queue.pending);self.assertFalse(self.engine.queue.deferred)
+        self.assertEqual(len(self.engine.queue.completed),4)
+
+    def test_disappearing_member_uses_same_reserve_when_pending_is_full(self):
+        self.engine.queue.limit=2;self.scanner.side_effect=self.disappear
+        self.finish_job(before_done=self.fill_new_arrivals)
+        self.assertEqual(set(self.engine.queue.deferred),{('p',str(self.survivor))})
+        self.assertTrue(self.results[0][1].retry_files)
+        self.assertFalse(self.engine.errors)
+
+    def test_busy_retry_does_not_overwrite_a_newer_event_quiet_period(self):
+        from clam_gui.execution import ScanBusyError
+        self.scanner.side_effect=ScanBusyError('busy')
+        def newer_event():
+            self.now=101;self.engine.queue.quiet=10
+            self.engine.file_event('p',str(self.survivor))
+            self.now=102
+        self.finish_job(before_done=newer_event)
+        self.assertEqual(self.engine.queue.pending['p',str(self.survivor)].due,111)
+
+    def test_deferred_files_are_revalidated_and_removed_plans_and_stop_clear_them(self):
+        self.busy_full_queue()
+        self.gone.unlink()
+        self.engine.configure([('p',replace(self.plan,excludes=[str(self.survivor)]))],False)
+        self.now=200;self.scanner.side_effect=None
+        self.scanner.return_value=(ScanStatus('検査完了',ResultKind.CLEAN),'synthetic')
+        self.finish_job()
+        self.assertEqual(set(self.scanner.call_args.kwargs['files']),set(map(str,self.arrivals)))
+        self.assertFalse(self.engine.queue.deferred)
+        # Exercise cleanup through real contention, rather than injecting entries.
+        def reserve_again():
+            self.engine.configure([('p',self.plan)],False)
+            self.now+=100
+            for file in (self.gone,self.survivor):
+                file.touch();self.engine.file_event('p',str(file))
+            self.busy_full_queue()
+            self.assertEqual(len(self.engine.queue.deferred),2)
+        reserve_again()
+        self.engine.forget_subtree('p',self.folder)
+        self.assertFalse(self.engine.queue.deferred)
+        reserve_again()
+        self.engine.configure([],False);self.assertFalse(self.engine.queue.deferred)
+        reserve_again()
+        self.engine.close();self.assertFalse(self.engine.queue.deferred)
+
+    def test_retry_reserve_is_bounded_and_reports_files_it_cannot_retain(self):
+        self.engine.queue.RETRY_LIMIT=1
+        self.busy_full_queue()
+        self.assertEqual(len(self.engine.queue.pending),2)
+        self.assertEqual(len(self.engine.queue.deferred),1)
+        self.assertIn('上限',self.engine.errors['p'])
+        self.assertEqual(len(self.store.recent()),1)
+        self.assertEqual(len(self.results),1)
+
+    def test_stop_before_contention_callback_does_not_restore_any_files(self):
+        from clam_gui.execution import ScanBusyError
+        self.scanner.side_effect=ScanBusyError('busy')
+        self.finish_job(before_done=self.engine.close)
+        self.assertFalse(self.engine.queue.pending);self.assertFalse(self.engine.queue.deferred)
