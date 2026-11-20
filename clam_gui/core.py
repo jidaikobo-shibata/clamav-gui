@@ -236,6 +236,33 @@ class Store:
             rows = db.execute('SELECT id, name, data FROM profiles ORDER BY rowid').fetchall()
         return [(key, Plan(name, **json.loads(data))) for key, name, data in rows]
 
+    def display_profiles(self, include_media=False):
+        from .plan_order import reconcile, PREFERENCE, MEDIA_ID
+        from .automation import media_plan
+        with self.connect() as db:
+            rows = db.execute('SELECT id, name, data FROM profiles ORDER BY rowid').fetchall()
+            plans = [(key, Plan(name, **json.loads(data))) for key, name, data in rows]
+            keys = [key for key, _ in plans] + [MEDIA_ID]
+            order = reconcile(self.preferences.get(PREFERENCE, [], db=db), keys)
+        if include_media:
+            plans.append((MEDIA_ID, media_plan()))
+        rank = {key: index for index, key in enumerate(order)}
+        return sorted(plans, key=lambda item: rank[item[0]])
+
+    def move_display_profile(self, key, anchor, *, after=False):
+        from .plan_order import reconcile, PREFERENCE, MEDIA_ID
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            keys = [row[0] for row in db.execute('SELECT id FROM profiles ORDER BY rowid')] + [MEDIA_ID]
+            if key not in keys or anchor not in keys:
+                raise ValueError('検査プランが見つかりません。一覧を開き直してください。')
+            if key == anchor:
+                return
+            order = reconcile(self.preferences.get(PREFERENCE, [], db=db), keys)
+            order.remove(key)
+            order.insert(order.index(anchor) + int(after), key)
+            self.preferences.set(PREFERENCE, order, db=db)
+
     def save_profile(self, plan, key=None):
         validate_profile(plan)
         if plan.kind == 'watch':

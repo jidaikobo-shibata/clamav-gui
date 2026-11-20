@@ -21,6 +21,7 @@ from .ui.preferences import PreferencesWindow
 from .ui.packages import PackageWindow
 from .ui.history import HistoryView
 from .ui.report import ReportPane
+from .ui.plan_order import PlanOrderWindow
 
 
 class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk.Application):
@@ -68,6 +69,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
             self.add_action(item)
             return item
         self.new_action = action('new-target', self.edit_profile)
+        action('order-plans', lambda: PlanOrderWindow(self).present())
         action('preferences', self.preferences)
         action('package-setup', self.package_setup)
         action('quit', self.request_quit)
@@ -79,6 +81,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         self.menu_model = Gio.Menu()
         targets = Gio.Menu()
         targets.append('検査プランを追加…(_N)', 'app.new-target')
+        targets.append('検査プランを並べ替え…(_O)', 'app.order-plans')
         self.menu_model.append_section(None, targets)
         environment = Gio.Menu()
         environment.append('環境設定…(_P)', 'app.preferences')
@@ -564,9 +567,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         if selected_key is None and hasattr(self, 'saved_profiles'):
             current = self.selected_profile()
             selected_key = current[0] if current else None
-        self.saved_profiles = self.store.profiles()
-        if self.store.automation_settings()['media_enabled']:
-            self.saved_profiles.append((MEDIA_ID, media_plan()))
+        self.saved_profiles = self.store.display_profiles(self.store.automation_settings()['media_enabled'])
         self.configure_automation()
         self.refreshing_profiles = True
         self.refresh_plan_list(selected_key)

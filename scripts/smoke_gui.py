@@ -77,14 +77,14 @@ def check():
 
     assert app.menu_model.get_n_items() == 3
     menu = app.menu_model.get_item_link(0, Gio.MENU_LINK_SECTION)
-    assert menu.get_n_items() == 1
+    assert menu.get_n_items() == 2
     actions = []
     for index in range(3):
         section = app.menu_model.get_item_link(index, Gio.MENU_LINK_SECTION)
         for item in range(section.get_n_items()):
             assert section.get_item_link(item, Gio.MENU_LINK_SUBMENU) is None
             actions.append(section.get_item_attribute_value(item, 'action', None).get_string())
-    assert actions == ['app.new-target', 'app.preferences',
+    assert actions == ['app.new-target', 'app.order-plans', 'app.preferences',
                        'app.package-setup', 'app.shortcuts', 'app.about']
     assert isinstance(app.get_active_window().get_titlebar(), Gtk.HeaderBar)
     assert app.main_menu.get_icon_name() == 'open-menu-symbolic'
@@ -209,6 +209,25 @@ def check():
     other_key = app.store.save_profile(other_plan)
     app.store.save('2026-11-17T09:00:00+09:00', other_plan.describe(), '検査完了', 'other plan log', other_key)
     app.refresh_profiles(key)
+    app.activate_action('order-plans', None)
+    order_window = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの並べ替え')
+    assert order_window.get_modal() and order_window.get_transient_for() == app.window
+    assert not order_window.rows[key]['actions'].lookup_action('up').get_enabled()
+    assert order_window.rows[key]['menu'].activate_action('order.down', None)
+    assert [k for k, _ in app.saved_profiles] == [other_key, key]
+    assert app.selected_profile()[0] == key
+    assert not order_window.rows[key]['actions'].lookup_action('down').get_enabled()
+    provider = order_window.rows[key]['source'].emit('prepare', 0.0, 0.0)
+    assert provider is not None
+    assert not order_window.rows[other_key]['target'].emit('drop', 'external text', 0.0, -1.0)
+    assert order_window.rows[other_key]['target'].emit('drop', order_window.drag_prefix + key, 0.0, -1.0)
+    assert [k for k, _ in app.saved_profiles] == [key, other_key]
+    with patch.object(app.store, 'move_display_profile', side_effect=OSError('synthetic write failure')):
+        assert not order_window.move(key, 1)
+        assert order_window.message.get_visible()
+        assert 'synthetic write failure' in order_window.message.get_text()
+        assert [k for k, _ in app.saved_profiles] == [key, other_key]
+    order_window.destroy()
     app.plan_list.select_row(app.plan_rows[other_key]['row'])
     assert app.selected_profile()[0] == other_key
     assert app.selected_plan_title.get_text() == other_plan.label
@@ -499,6 +518,17 @@ def check():
     app.store.set_automation_settings(values)
     app.refresh_profiles(MEDIA_ID)
     assert MEDIA_ID in app.plan_rows
+    app.activate_action('order-plans', None)
+    order_window = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの並べ替え')
+    first = app.saved_profiles[0][0]
+    assert order_window.drop(order_window.drag_prefix + MEDIA_ID, first, False)
+    assert app.saved_profiles[0][0] == MEDIA_ID
+    assert app.selected_profile()[0] == MEDIA_ID
+    last = app.saved_profiles[-1][0]
+    assert order_window.drop(order_window.drag_prefix + MEDIA_ID, last, True)
+    assert app.saved_profiles[-1][0] == MEDIA_ID
+    order_window.destroy()
+
     assert 'delete' not in app.plan_rows[MEDIA_ID]['actions']
     assert 'duplicate' not in app.plan_rows[MEDIA_ID]['actions']
     info = watched.stat()
