@@ -13,9 +13,11 @@ class HistoryController:
         self.selected = None
         self.shown = None
         self.loading = False
+        self.latest_requested = False
         self.reader = LatestReader(GLib.idle_add)
 
-    def reload(self, selected):
+    def reload(self, selected, *, latest=False):
+        self.latest_requested = latest or (self.latest_requested and selected == self.selected)
         old = self.listing.get_selected_row()
         old_id = self.entries[old.get_index()].id if old and old.get_index() < len(self.entries) else None
         if selected != self.selected:
@@ -44,7 +46,8 @@ class HistoryController:
                 label.set_attributes(attributes)
                 label.update_property([Gtk.AccessibleProperty.LABEL], [entry.date_label() + ' 検出あり'])
             self.listing.append(label)
-        index = next((i for i, entry in enumerate(self.entries) if entry.id == old_id), 0)
+        index = 0 if self.latest_requested else next((i for i, entry in enumerate(self.entries) if entry.id == old_id), 0)
+        self.latest_requested = False
         if self.entries:
             self.listing.select_row(self.listing.get_row_at_index(index))
         self.loading = False
@@ -114,11 +117,11 @@ class HistoryView:
         window.present()
         controller.reload((MEDIA_ID, media_plan()))
 
-    def history(self, _button):
+    def history(self, _button, *, latest=False):
         if not hasattr(self, 'history_controller'):
             self.history_controller = HistoryController(self.store, self.history_list, self.result,
                                                          lambda entries: setattr(self, 'log_entries', entries))
-        self.history_controller.reload(self.selected_profile())
+        self.history_controller.reload(self.selected_profile(), latest=latest)
 
     def log_selected(self, *_args):
         if hasattr(self, 'history_controller'):

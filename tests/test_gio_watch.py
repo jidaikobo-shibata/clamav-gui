@@ -85,11 +85,13 @@ class GioWatchTests(unittest.TestCase):
         self.assertEqual(len(self.source.monitors),2)
 
     def test_missing_root_is_reported_and_can_be_retried(self):
+        self.source.clock=lambda:0
         missing=self.folder/'missing';plan=replace(self.plan,targets=[str(missing)])
         self.engine.configure([('watch',plan)],False);self.source.configure([('watch',plan)])
         self.wait(lambda:self.source.idle is None)
         self.assertIn('watch',self.engine.errors)
         missing.mkdir()
+        self.source.clock=lambda:30
         self.source.configure([('watch',plan)])
         self.wait(lambda:self.source.idle is None)
         self.assertIn(('watch',str(missing)),self.source.monitors)

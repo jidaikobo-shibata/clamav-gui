@@ -27,10 +27,12 @@ def removable_mount(mount):
 
 
 class Observers:
-    def __init__(self, engine, volumes=None, limit=1024):
+    def __init__(self, engine, volumes=None, limit=1024, clock=time.monotonic):
         self.inventory = None
         self.engine = engine
         self.limit = limit
+        self.clock = clock
+        self.retry = {}
         self.plans = {}
         self.monitors = {}
         self.tasks = deque()
@@ -46,21 +48,41 @@ class Observers:
         for mount in self.volumes.get_mounts():
             self.remember_mount(mount, scan=False)
 
+    def discard_plan(self, key):
+        for ident in list(self.monitors):
+            if ident[0] == key:
+                self.monitors.pop(ident).cancel()
+        if self.current and self.current[0] == key:
+            self.finish_directory()
+        self.tasks = deque(task for task in self.tasks if task[0] != key)
+        self.queued = {ident for ident in self.queued if ident[0] != key}
+        self.overflow.discard(key)
+        self.retry.pop(key, None)
+
     def configure(self, plans):
         plans = dict(plans)
-        if plans == self.plans and all((key, str(plan.targets[0])) in self.monitors for key, plan in plans.items()):
-            return
-        for monitor in self.monitors.values():
-            monitor.cancel()
-        self.monitors.clear()
-        self.finish_directory()
-        self.tasks.clear()
-        self.queued.clear()
-        self.overflow.clear()
+        known = set(self.plans) | {key for key, _ in self.monitors} | set(self.retry)
+        changed = {key for key, plan in plans.items() if self.plans.get(key) != plan}
+        for key in changed | (known - plans.keys()):
+            self.discard_plan(key)
         self.plans = plans
+        now = self.clock()
         for key, plan in plans.items():
-            self.engine.errors.pop(key, None)
-            self.enqueue(key, plan.targets[0], False)
+            if key in changed:
+                self.engine.errors.pop(key, None)
+                self.retry[key] = now + 30, 30
+                self.enqueue(key, plan.targets[0], False)
+                continue
+            root = key, str(plan.targets[0])
+            if root in self.monitors or root in self.queued:
+                continue
+            due, delay = self.retry.get(key, (now, 15))
+            if now >= due:
+                # A missing root must not tear down any other plan's monitors.
+                self.discard_plan(key)
+                delay = min(300, delay * 2)
+                self.retry[key] = now + delay, delay
+                self.enqueue(key, plan.targets[0], False)
 
     def enqueue(self, key, path, scan_files):
         ident = key, str(path)
@@ -131,7 +153,7 @@ class Observers:
                 continue
             if not allowed_path(plan, directory) or not Path(directory).is_dir():
                 if directory == str(plan.targets[0]):
-                    self.engine.warn(key, plan, '監視フォルダーが見つからないか読み取れません。設定を保存し直してください。')
+                    self.engine.warn(key, plan, '監視フォルダーが見つからないか読み取れません。自動で再試行します。')
                 continue
             if (key, directory) not in self.monitors:
                 if len(self.monitors) >= self.limit:
@@ -149,7 +171,14 @@ class Observers:
             try:
                 self.current = key, directory, scan_files, os.scandir(directory), 0
                 self.queued.add((key, directory))
+                if directory == str(plan.targets[0]) and key in self.retry:
+                    # Clear the missing-root error only after reopening succeeds.
+                    self.engine.errors.pop(key, None)
+                    self.retry.pop(key, None)
             except OSError as error:
+                monitor = self.monitors.pop((key, directory), None)
+                if monitor:
+                    monitor.cancel()
                 self.engine.warn(key, plan, '監視フォルダーを読み取れません：' + str(error))
             if time.monotonic() >= deadline:
                 return True
@@ -165,7 +194,7 @@ class Observers:
                 if ident[0] == key and path and (Path(ident[1]) == Path(path) or Path(path) in Path(ident[1]).parents):
                     self.monitors.pop(ident).cancel()
             if path == plan.targets[0]:
-                self.engine.warn(key, plan, '監視フォルダーが見つかりません。設定を保存し直すと監視を再開します。')
+                self.engine.warn(key, plan, '監視フォルダーが見つかりません。自動で再試行します。')
             return
         if event not in (Gio.FileMonitorEvent.CREATED, Gio.FileMonitorEvent.CHANGED,
                          Gio.FileMonitorEvent.CHANGES_DONE_HINT, Gio.FileMonitorEvent.RENAMED,
@@ -232,3 +261,4 @@ class Observers:
         self.tasks.clear()
         self.queued.clear()
         self.overflow.clear()
+        self.retry.clear()

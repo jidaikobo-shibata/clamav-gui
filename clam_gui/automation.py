@@ -1,7 +1,7 @@
 """Bounded queues and cooperative jobs for foreground-only automatic scans."""
 from .jobs import execute_scan
 from .execution import ScanAlreadyQueued
-from .results import assess
+from .results import assess, ScanStatus, ResultKind
 from dataclasses import dataclass
 import datetime
 import os
@@ -174,11 +174,15 @@ class Automation:
         if self.clock() - self.warning_at.get(key, float('-inf')) >= 30:
             self.warning_at[key] = self.clock()
             now = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
+            status = ScanStatus('検査不完了：' + message, ResultKind.INCOMPLETE)
             try:
-                self.store.save(now, plan.describe(), '検査不完了：' + message, message, key)
+                self.store.save(now, plan.describe(), status, message, key)
             except Exception as error:
-                self.errors[key] += '\n履歴も保存できませんでした：' + str(error)
+                detail = '\n履歴も保存できませんでした：' + str(error)
+                self.errors[key] += detail
+                status += detail
             self.changed()
+            self.finished(key, status, message, plan.label)
 
     def file_event(self, key, path):
         plan = self.plans.get(key)

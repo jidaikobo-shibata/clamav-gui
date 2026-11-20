@@ -622,8 +622,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
 
     def finished(self, status, output, key=None):
         self.release_manual_job(key)
-        self.history(None)
-        self.history_list.select_row(self.history_list.get_row_at_index(0))
+        self.history(None, latest=True)
         self.show_notice(status)
         notification = Gio.Notification.new('ClamAV検査終了')
         from .mailboxes import MAILBOX_NOTE

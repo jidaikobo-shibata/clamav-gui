@@ -1,5 +1,4 @@
 """User-session service management and private cross-process monitoring state."""
-from dataclasses import replace
 import hashlib
 import os
 from pathlib import Path
@@ -24,17 +23,17 @@ def enabled(store):
 
 
 def watched_plans(store):
-    internal = [store.path.parent, Path.home()/'.clamdlog']
+    from .watch_scope import safe_watch_plan
     plans = []
     schedules = read_schedules(store)
     for key, plan in store.profiles():
         if plan.kind != 'watch' or not (schedules.get(key) and schedules[key].enabled) or plan.requires_admin:
             continue
-        root = Path(plan.targets[0])
-        if any(root == path or path in root.parents for path in internal):
+        try:
+            plans.append((key, safe_watch_plan(plan, store.path.parent)))
+        except (ValueError, OSError, RuntimeError):
+            # Old/imported profiles receive the same protection as newly saved ones.
             continue
-        excluded = list(plan.excluded_dirs) + [str(path) for path in internal if root in path.parents]
-        plans.append((key, replace(plan, excluded_dirs=excluded)))
     return plans
 
 

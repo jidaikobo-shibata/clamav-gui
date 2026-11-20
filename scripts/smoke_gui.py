@@ -125,6 +125,26 @@ def check():
     settle_history()
     buffer = app.result.get_buffer()
     assert 'normal log' in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+    # Completion must select the new row after asynchronous headers arrive,
+    # even if another refresh supersedes the first request.
+    app.store.save('2026-11-20T12:00:00+09:00', plan.describe(), '検査完了', 'latest completed log', key)
+    app.finished('検査完了', 'latest completed log', key)
+    app.history(None)
+    settle_history()
+    assert app.history_list.get_selected_row().get_index() == 0
+    buffer = app.result.get_buffer()
+    assert 'latest completed log' in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+    latest = app.log_entries[0].id
+    # Plain refreshes preserve the user's explicit selection.
+    app.history_list.select_row(app.history_list.get_row_at_index(2))
+    settle_history()
+    app.history(None)
+    settle_history()
+    assert app.history_list.get_selected_row().get_index() == 2
+    with app.store.connect() as db:
+        db.execute('DELETE FROM scans WHERE rowid=?', (latest,))
+    app.history(None)
+    settle_history()
     def descendants(widget):
         yield widget
         child = widget.get_first_child()

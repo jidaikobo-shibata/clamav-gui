@@ -211,9 +211,9 @@ class Store:
 
     def save_profile(self, plan, key=None):
         validate_profile(plan)
-        if plan.kind == 'watch' and any(Path(plan.targets[0]) == path or path in Path(plan.targets[0]).parents
-                                       for path in (self.path.parent, Path.home()/'.clamdlog')):
-            raise ValueError('アプリ自身の保存先・ロック用フォルダーは監視できません。')
+        if plan.kind == 'watch':
+            from .watch_scope import safe_watch_plan
+            safe_watch_plan(plan, self.path.parent)
         if plan.kind == 'media' or key == 'external-media':
             raise ValueError('外部メディア検査は環境設定で管理してください。')
         plan = replace(plan, targets=[os.path.normpath(str(p)) for p in plan.targets],
