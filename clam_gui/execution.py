@@ -13,6 +13,11 @@ class ScanAlreadyQueued(ValueError):
     pass
 
 
+class ScanFilesChanged(ValueError):
+    """An event batch contains paths that disappeared or left its allowed scope."""
+    pass
+
+
 class ScanQueueFull(ValueError):
     pass
 

@@ -285,6 +285,14 @@ class Automation:
                         for item in batch:
                             self.queue.put(key, self.plans[key], item.path)
                 elif not retry:
+                    if (getattr(status, 'retry_files', False) and not self.closed and
+                            not self.cancel.is_set() and key in self.plans):
+                        # Revalidate against the current plan. Keep newer events
+                        # and their quiet periods instead of overwriting them.
+                        for item in batch:
+                            if (key, item.path) not in self.queue.pending:
+                                if not self.queue.put(key, self.plans[key], item.path):
+                                    self.warn(key, self.plans[key], '検査待ちが1000件を超えました。再試行対象の一部を保持できません。フォルダー全体を検査してください。')
                     if assess(status, output).completed:
                         for item in batch:
                             if signature(item.path) == item.signature and (key, item.path) not in self.queue.pending:

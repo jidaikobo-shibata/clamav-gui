@@ -12,7 +12,7 @@ import shutil
 import sqlite3
 import subprocess
 from .retention import DEFAULTS as AUTOMATION_DEFAULTS, validate as validate_automation, prune, initialize as initialize_retention
-from .execution import ScanBusyError, ScanAlreadyQueued, lane_for, lock_path as default_lock_path
+from .execution import ScanBusyError, ScanAlreadyQueued, ScanFilesChanged, lane_for, lock_path as default_lock_path
 from .runtime import track_scan
 from .platforms import get_backend
 from .settings import Preferences
@@ -391,8 +391,10 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
     validate_profile(plan)
     if files is not None:
         from .automation import allowed_file
-        if not files or len(files) > 50 or any(not allowed_file(plan, path) for path in files):
-            raise ValueError('監視対象のファイルが消失・変更されたか、検査範囲外です。')
+        if not files or len(files) > 50:
+            raise ValueError('監視による検査ファイルは1〜50件で指定してください。')
+        if any(not allowed_file(plan, path) for path in files):
+            raise ScanFilesChanged('監視対象のファイルが消失・変更されたか、検査範囲外です。')
     binary = shutil.which('clamscan')
     if not binary:
         raise ValueError('ClamAVが見つかりません。')

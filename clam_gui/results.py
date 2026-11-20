@@ -32,14 +32,15 @@ class ScanStatus(str):
     SQLite stores kind and detected separately. Japanese parsing is used only
     when importing legacy/plain-text results, never to classify a new scan.
     """
-    def __new__(cls, message, kind, detected=False, *, started_at=None):
+    def __new__(cls, message, kind, detected=False, *, started_at=None, retry_files=False):
         value = super().__new__(cls, message)
         value.assessment = Assessment(ResultKind(kind), bool(detected))
         value.started_at = started_at
+        value.retry_files = bool(retry_files)
         return value
 
     def __add__(self, detail):
-        return ScanStatus(str.__add__(self, detail), self.assessment.kind, self.assessment.detected, started_at=self.started_at)
+        return ScanStatus(str.__add__(self, detail), self.assessment.kind, self.assessment.detected, started_at=self.started_at, retry_files=self.retry_files)
 
 
 def assess(status, output='', *, kind=None, detected=None):
