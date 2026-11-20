@@ -132,3 +132,44 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report.groups[0].count, 150)
         self.assertEqual(len(report.groups[0].examples), PREVIEW_LIMIT)
         self.assertEqual(report.groups[1].title, '権限不足')
+
+    def test_cancelled_with_storage_failure_keeps_rescan_and_storage_advice(self):
+        from clam_gui.core import storage_warning
+        from clam_gui.results import ScanStatus, ResultKind
+        status, output = storage_warning(ScanStatus('検査を中止しました', ResultKind.CANCELLED),
+                                         '', OSError('No space left on device'))
+        report = build_report(entry(output, str(status), 0, status.assessment.kind))
+        self.assertEqual(report.title, '検査を中止しました')
+        self.assertIn('未検査', report.description)
+        self.assertIn('再検査', report.action)
+        self.assertIn('空き容量', report.action)
+        self.assertIn('コピー', report.action)
+
+    def test_preflight_and_storage_failure_keep_original_reason(self):
+        from clam_gui.core import record_scan_failure
+        from unittest.mock import Mock
+        store = Mock()
+        store.save.side_effect = OSError('database is locked')
+        status, output = record_scan_failure(store, Mock(), ValueError('ClamAVが見つかりません。'))
+        report = build_report(entry(output, str(status), 0, status.assessment.kind))
+        self.assertIn('ClamAVが見つかりません', report.description)
+        self.assertIn('database is locked', report.description)
+        self.assertIn('再検査', report.action)
+        self.assertIn('保存先', report.action)
+        self.assertEqual(report.groups[0].title, '履歴保存エラー')
+
+    def test_detected_cancelled_and_storage_failure_preserve_all_actions(self):
+        report = build_report(entry('/example/a: Test FOUND\n履歴保存エラー：disk full',
+                                    '検査を中止しました', 1, 'cancelled'))
+        self.assertEqual(report.title, '検出あり・検査中止')
+        for text in ('入手元', '再検査', '保存先', 'コピー'):
+            self.assertIn(text, report.action)
+
+    def test_clean_scan_with_storage_failure_does_not_force_rescan(self):
+        from clam_gui.core import storage_warning
+        from clam_gui.results import ScanStatus, ResultKind
+        status, output = storage_warning(ScanStatus('検査完了', ResultKind.CLEAN),
+                                         'Scanned files: 1\nInfected files: 0\n', OSError('disk full'))
+        report = build_report(entry(output, str(status), 0, status.assessment.kind))
+        self.assertIn('保存先', report.action)
+        self.assertNotIn('再検査', report.action)

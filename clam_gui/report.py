@@ -147,8 +147,16 @@ def build_report(entry):
         action='理由別の一覧を開き、必要な対象を確認して再検査してください。'
         if not counts:description=entry.status or '詳しい理由が記録されていません。'
 
-    if not (entry.is_detected() or detected_count or uncertain) and set(counts).issubset({'execution','storage'}) and counts:
-        action=' '.join(GROUPS[key][1] for key in ('execution','storage') if counts[key])
+    # A storage problem must not hide an earlier failure or cancellation.
+    explicit_failure=entry.status.startswith('検査不完了：') and not entry.status.startswith('検査不完了：履歴を保存できませんでした')
+    app_advice=' '.join(GROUPS[key][1] for key in ('execution','storage') if counts[key])
+    if app_advice:
+        if explicit_failure:
+            description+='\n'+entry.status
+        storage_only=(not (entry.is_detected() or detected_count or uncertain or explicit_failure)
+                      and result.kind!=ResultKind.CANCELLED
+                      and set(counts).issubset({'execution','storage'}))
+        action=app_advice if storage_only else action+' '+app_advice
 
     if result.kind==ResultKind.CANCELLED:
         if entry.is_detected() or detected_count:
