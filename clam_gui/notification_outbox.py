@@ -33,6 +33,9 @@ class NotificationOutbox:
         self.state_at = float('-inf')
         urgency = 'critical' if urgency == 'critical' else 'normal'
         with self.store.connect() as db:
+            # Enqueue runs on the GLib thread; let NotificationRetry retain
+            # the notice instead of blocking event processing on a DB lock.
+            db.execute('PRAGMA busy_timeout=0')
             db.execute('BEGIN IMMEDIATE')
             rows = db.execute('SELECT count(*) FROM notification_outbox WHERE merge_key IS NULL').fetchone()[0]
             if rows < self.LIMIT:

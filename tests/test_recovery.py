@@ -399,3 +399,119 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT count(*) FROM monitor_roots').fetchone()[0],0)
         monitor.checkpoints.complete_baseline(monitors)
         self.assertIn('p',monitor.checkpoints.ready)
+
+    def test_locked_configuration_keeps_old_state_and_retries_latest_settings(self):
+        from clam_gui.core import Plan
+        from clam_gui.background import put_preference
+        monitor=self.monitor();monitor.observers.configure=Mock()
+        folders=[self.root/name for name in ('old','new','latest')]
+        for folder in folders:folder.mkdir()
+        plans=[Plan(folder.name,[str(folder)],[],kind='watch') for folder in folders]
+        put_preference(self.store,'background-enabled',True)
+        with patch('clam_gui.monitor.time.monotonic',return_value=100) as clock, \
+             patch('clam_gui.monitor.watched_plans',return_value=[('p',plans[0])]) as selected, \
+             patch.object(monitor.engine,'tick') as tick:
+            self.assertTrue(monitor.checked_tick())
+            previous=dict(monitor.checkpoints.roots)
+            with self.store.connect() as lock:
+                lock.execute('BEGIN IMMEDIATE')
+                selected.return_value=[('p',plans[1])];clock.return_value=103
+                started=time.perf_counter()
+                self.assertTrue(monitor.checked_tick())
+                self.assertLess(time.perf_counter()-started,1)
+                self.assertEqual(monitor.config_due,108)
+                self.assertEqual(monitor.checkpoints.roots,previous)
+                self.assertEqual(monitor.engine.plans['p'],plans[0])
+                calls=selected.call_count;clock.return_value=104
+                self.assertTrue(monitor.checked_tick());self.assertEqual(selected.call_count,calls)
+                clock.return_value=108
+                self.assertTrue(monitor.checked_tick());self.assertEqual(monitor.config_due,118)
+            selected.return_value=[('p',plans[2])];clock.return_value=118
+            self.assertTrue(monitor.checked_tick())
+            self.assertEqual(tick.call_count,5)
+        self.assertEqual(monitor.engine.plans['p'],plans[2])
+        self.assertIn(str(folders[2]),monitor.checkpoints.roots['p'])
+        self.assertEqual(monitor.config_error,'');self.assertEqual(monitor.config_attempts,0)
+        self.assertFalse(monitor.stopping);self.assertIsNone(monitor.failure)
+
+    def test_configuration_rollback_preserves_all_previous_checkpoint_state(self):
+        from clam_gui.core import Plan
+        monitor=self.monitor()
+        old=self.root/'old';old.mkdir();file=old/'file';file.touch()
+        new=self.root/'new';new.mkdir()
+        plans=[('p',Plan('old',[str(old)],[],kind='watch'))]
+        monitor.checkpoints.configure(plans);monitor.engine.configure(plans,False)
+        monitor.checkpoints.inventory('p',str(file))
+        monitor.checkpoints.complete_baseline({('p',str(old)):object()})
+        previous=(dict(monitor.checkpoints.roots),set(monitor.checkpoints.ready),dict(monitor.checkpoints.files))
+        connect=self.store.connect
+        @contextmanager
+        def failing_commit():
+            with connect() as db:
+                yield db
+                raise sqlite3.OperationalError('commit failed')
+        replacement=[('p',Plan('new',[str(new)],[],kind='watch'))]
+        with patch.object(self.store,'connect',failing_commit),self.assertRaises(sqlite3.Error):
+            monitor.checkpoints.configure(replacement)
+        self.assertEqual((monitor.checkpoints.roots,monitor.checkpoints.ready,monitor.checkpoints.files),previous)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT path FROM monitor_files').fetchone()[0],str(file))
+        monitor.checkpoints.configure(replacement)
+        self.assertEqual(monitor.checkpoints.ready,set());self.assertFalse(monitor.checkpoints.files)
+
+    def test_critical_notice_does_not_wait_for_database_lock_and_survives_restart(self):
+        monitor=self.monitor()
+        with self.store.connect() as lock:
+            lock.execute('BEGIN IMMEDIATE')
+            started=time.perf_counter()
+            monitor.finished('p',ScanStatus('検出あり',ResultKind.DETECTED,True),'synthetic')
+            self.assertLess(time.perf_counter()-started,1)
+            self.assertEqual(monitor.notification_retry.count,1)
+            self.assertTrue(monitor.notification_retry.path.exists())
+            recovered=self.buffer();recovered.load();self.assertEqual(recovered.count,1)
+        self.now=monitor.notification_retry.due
+        monitor.flush()
+        self.assertEqual(monitor.notification_retry.count,0)
+        self.assertEqual(monitor.outbox.state()['pending'],1)
+        self.assertFalse(monitor.notification_retry.path.exists())
+
+    def test_gio_watch_continues_until_replacement_configuration_commits(self):
+        from gi.repository import GLib
+        from clam_gui.gio_watch import Observers
+        from clam_gui.core import Plan
+        from clam_gui.background import put_preference
+        class Volumes:
+            def connect(self,*args):return len(args)
+            def disconnect(self,*args):pass
+            def get_mounts(self):return []
+        old=self.root/'old';old.mkdir();new=self.root/'new';new.mkdir()
+        plans=[('p',Plan('old',[str(old)],[],kind='watch'))]
+        monitor=Monitor(self.store,observers=lambda engine:Observers(engine,Volumes()),notifier=Mock())
+        self.addCleanup(monitor.shutdown)
+        put_preference(self.store,'background-enabled',True)
+        def settle():
+            deadline=time.perf_counter()+3
+            while monitor.observers.idle is not None and time.perf_counter()<deadline:
+                GLib.MainContext.default().iteration(False)
+            self.assertIsNone(monitor.observers.idle)
+        with patch('clam_gui.monitor.time.monotonic',return_value=100) as clock, \
+             patch('clam_gui.monitor.watched_plans',return_value=plans) as selected, \
+             patch.object(monitor.engine,'tick'):
+            self.assertTrue(monitor.checked_tick());settle()
+            self.assertTrue(monitor.checked_tick())
+            watcher=monitor.observers.monitors['p',str(old)]
+            selected.return_value=[('p',Plan('new',[str(new)],[],kind='watch'))]
+            with self.store.connect() as lock:
+                lock.execute('BEGIN IMMEDIATE');clock.return_value=103
+                self.assertTrue(monitor.checked_tick())
+                self.assertIs(monitor.observers.monitors['p',str(old)],watcher)
+                file=old/'arrived';file.touch()
+                deadline=time.perf_counter()+3
+                while ('p',str(file)) not in monitor.engine.queue.pending and time.perf_counter()<deadline:
+                    GLib.MainContext.default().iteration(False)
+                self.assertIn(('p',str(file)),monitor.engine.queue.pending)
+            clock.return_value=108
+            self.assertTrue(monitor.checked_tick());settle()
+            self.assertNotIn(('p',str(old)),monitor.observers.monitors)
+            self.assertIn(('p',str(new)),monitor.observers.monitors)
+        self.assertFalse(monitor.stopping);self.assertFalse(monitor.config_error)

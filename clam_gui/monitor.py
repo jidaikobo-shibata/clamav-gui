@@ -33,13 +33,13 @@ class Checkpoints:
         if configs == self.roots:
             return
         self.flush()
-        self.roots = configs
-        self.ready.clear()
+        ready = set()
         with self.store.connect() as db:
+            db.execute('PRAGMA busy_timeout=0')
             for key, config in configs.items():
                 old = db.execute('SELECT config FROM monitor_roots WHERE id=?', (key,)).fetchone()
                 if old and old[0] == config:
-                    self.ready.add(key)
+                    ready.add(key)
                 else:
                     db.execute('DELETE FROM monitor_files WHERE id=?', (key,))
                     db.execute('DELETE FROM monitor_roots WHERE id=?', (key,))
@@ -47,7 +47,9 @@ class Checkpoints:
                 if key not in configs:
                     db.execute('DELETE FROM monitor_files WHERE id=?', (key,))
                     db.execute('DELETE FROM monitor_roots WHERE id=?', (key,))
-            self.files = {(key, path): stamp for key, path, stamp in db.execute('SELECT id,path,stamp FROM monitor_files LIMIT ?', (self.LIMIT,))}
+            files = {(key, path): stamp for key, path, stamp in db.execute('SELECT id,path,stamp FROM monitor_files LIMIT ?', (self.LIMIT,))}
+        # Publish the replacement only after the entire transaction commits.
+        self.roots, self.ready, self.files = configs, ready, files
 
     def inventory(self, key, path):
         stamp = signature(path)
@@ -132,6 +134,9 @@ class Monitor:
         self.checkpoint_error = ''
         self.checkpoint_scans_pending = False
         self.publish_due = 0
+        self.config_due = self.config_attempts = 0
+        self.config_error = ''
+        self.reenumerate = False
         self.generation = __import__('uuid').uuid4().hex
 
     def changed(self):
@@ -196,18 +201,34 @@ class Monitor:
         now = time.monotonic()
         resumed = time.time()-self.last_tick > 15
         self.last_tick = time.time()
-        if now-self.last_config_time > 2 or resumed:
-            plans = watched_plans(self.store)
-            media = self.store.automation_settings()['media_enabled']
-            self.checkpoints.configure(plans)
-            self.engine.configure(plans, media)
-            if resumed:
-                self.observers.plans = {}  # Re-enumerate metadata after suspension/event gaps.
-            self.observers.configure(plans)
-            if (resumed or not self.started) and media:
-                self.observers.scan_connected()
-            self.started = True
-            self.last_config_time = now
+        self.reenumerate = self.reenumerate or resumed
+        if now >= self.config_due and (now-self.last_config_time > 2 or self.reenumerate):
+            try:
+                # Keep the active plans and checkpoint state together until the
+                # replacement metadata commits; retry with the latest settings.
+                plans = watched_plans(self.store)
+                media = self.store.automation_settings()['media_enabled']
+                self.checkpoints.configure(plans)
+            except sqlite3.Error as error:
+                self.config_attempts += 1
+                self.config_due = now + min(300, 5 * 2**min(self.config_attempts-1, 6))
+                self.config_error = '監視設定を反映できません。変更前の設定で監視を続け、自動で再試行します：' + str(error)[:256]
+                report(self.config_error)
+            else:
+                self.engine.configure(plans, media)
+                if self.reenumerate:
+                    self.observers.plans = {}  # Re-enumerate after suspension/event gaps.
+                self.observers.configure(plans)
+                if (self.reenumerate or not self.started) and media:
+                    self.observers.scan_connected()
+                self.started = True
+                self.last_config_time = now
+                self.config_due = self.config_attempts = 0
+                self.config_error = ''
+                self.reenumerate = False
+        if self.config_error:
+            # Existing plans can still repair a missing root during the wait.
+            self.observers.configure(list(self.engine.plans.items()))
         if not getattr(self.observers, 'discovering', self.observers.tasks):
             self.save_checkpoints(baseline=True)
         command = self.command_value
@@ -223,8 +244,9 @@ class Monitor:
         statuses[MEDIA_ID] = self.engine.status(MEDIA_ID)
         if not __import__('shutil').which('clamscan'):
             statuses = {key: 'ClamAV未導入：検査待ちを保持しています' for key in statuses}
-        if self.checkpoint_error:
-            statuses = {key: value + '\n' + self.checkpoint_error for key, value in statuses.items()}
+        for error in (self.checkpoint_error, self.config_error):
+            if error:
+                statuses = {key: value + '\n' + error for key, value in statuses.items()}
         # Publish changed state promptly; keep the eight-second lease fresh at
         # three-second intervals without rewriting identical state twice a second.
         delivery = dict(self.outbox.cached_state())
