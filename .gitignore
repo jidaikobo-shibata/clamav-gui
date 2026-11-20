@@ -16,3 +16,5 @@ build/
 
 notification-retry.json
 .notification-retry-*
+
+notification-retry-pending.json

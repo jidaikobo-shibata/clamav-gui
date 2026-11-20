@@ -64,8 +64,12 @@ def assess(status, output='', *, kind=None, detected=None):
     return Assessment(outcome, found)
 
 
+def found_signature(line):
+    return line[:-6].rpartition(': ')[2] if line.endswith(' FOUND') else ''
+
+
 def warning_signature(line):
-    return any(': ' + prefix in line for prefix in (
+    return any(found_signature(line).startswith(prefix) for prefix in (
         'Heuristics.Limits.Exceeded.', 'Heuristics.Encrypted.', 'Heuristics.OLE2.ContainsMacros',
         'Heuristics.Broken.'))
 
@@ -86,8 +90,8 @@ def summarize(code, output, cancelled=False):
     def total(name):
         return sum(int(n) for n in re.findall(r'^' + name + r':\s*(\d+)\s*$', output, re.M))
     found = [line for line in output.splitlines() if line.endswith(' FOUND')]
-    limits = [line for line in found if ': Heuristics.Limits.Exceeded.' in line]
-    encrypted = [line for line in found if ': Heuristics.Encrypted.' in line]
+    limits = [line for line in found if found_signature(line).startswith('Heuristics.Limits.Exceeded.')]
+    encrypted = [line for line in found if found_signature(line).startswith('Heuristics.Encrypted.')]
     warnings = [line for line in found if warning_signature(line)]
     threats = [line for line in found if line not in warnings]
     errors = total('Total errors')

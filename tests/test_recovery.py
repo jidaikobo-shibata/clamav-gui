@@ -153,10 +153,13 @@ class RecoveryTests(unittest.TestCase):
 
     def test_corrupt_recovery_file_is_preserved(self):
         retry=self.buffer();retry.path.write_text('not valid JSON')
+        original=retry.path
         retry.add(AutomaticNotice('detected','body','critical'))
-        retry.drain(Mock())
-        self.assertEqual(retry.count,1)
-        self.assertEqual(retry.path.read_text(),'not valid JSON')
+        deliver=Mock()
+        retry.drain(deliver)
+        deliver.assert_called_once()
+        self.assertEqual(retry.count,0)
+        self.assertEqual(original.read_text(),'not valid JSON')
         self.assertTrue(retry.error)
 
     def test_spool_failure_does_not_discard_memory_pending_notices(self):
@@ -235,3 +238,38 @@ class RecoveryTests(unittest.TestCase):
             monitor.shutdown()
         self.assertIsNone(monitor.lease.file)
         self.assertIsNotNone(monitor.failure)
+
+    def test_corrupt_primary_uses_restartable_alternate_and_merges_after_repair(self):
+        retry=self.buffer();primary=retry.path;primary.write_text('{broken')
+        retry.add(AutomaticNotice('critical','body','critical'))
+        retry.drain(Mock(side_effect=sqlite3.OperationalError('offline')))
+        self.assertNotEqual(retry.path,primary)
+        self.assertEqual(primary.read_text(),'{broken')
+        primary.write_text(json.dumps(dict(version=1,rows=[])))
+        recovered=self.buffer();recovered.load()
+        self.assertEqual(recovered.count,1)
+        recovered.drain(Mock())
+        again=self.buffer();again.load();self.assertEqual(again.count,0)
+
+    def test_two_corrupt_files_keep_new_notices_deliverable_in_memory(self):
+        retry=self.buffer();retry.path.write_text('broken primary')
+        alternate=retry.path.parent/'notification-retry-pending.json'
+        alternate.write_text('broken alternate')
+        retry.add(AutomaticNotice('critical','body','critical'))
+        retry.drain(Mock(side_effect=sqlite3.OperationalError('offline')))
+        self.assertEqual(retry.count,1)
+        self.assertEqual(alternate.read_text(),'broken alternate')
+        self.now=retry.due;deliver=Mock();retry.drain(deliver)
+        deliver.assert_called_once();self.assertEqual(retry.count,0)
+        self.assertTrue(retry.error)
+
+    def test_corrupt_spool_does_not_stop_monitor_tick(self):
+        from clam_gui.background import put_preference
+        monitor=self.monitor()
+        monitor.notification_retry.path.write_text('broken')
+        monitor.observers.configure=Mock()
+        put_preference(self.store,'background-enabled',True)
+        self.assertTrue(monitor.checked_tick())
+        self.assertFalse(monitor.stopping)
+        self.assertIsNone(monitor.failure)
+        self.assertTrue(monitor.last_state['notifications']['error'])

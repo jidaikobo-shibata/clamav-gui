@@ -40,6 +40,7 @@ class Observers:
         self.overflow = set()
         self.idle = None
         self.current = None
+        self.active_key = None
         self.mounts = {}
         self.volumes = volumes if volumes is not None else Gio.VolumeMonitor.get()
         self.signals = [self.volumes.connect('mount-added', self.mount_added),
@@ -111,6 +112,29 @@ class Observers:
             self.current = None
 
     def drain(self):
+        try:
+            return self._drain()
+        except Exception as error:
+            # GLib removes a failed source. Reset our handle and isolate the
+            # affected plan so configure() can rebuild it after a backoff.
+            key = self.current[0] if self.current else self.active_key
+            self.idle = None
+            if key in self.plans:
+                plan = self.plans[key]
+                delay = min(300, self.retry.get(key, (0, 15))[1] * 2)
+                self.discard_plan(key)
+                self.retry[key] = self.clock() + delay, delay
+                message = '監視準備に失敗しました。自動で再試行します：' + str(error)
+                self.engine.errors[key] = message
+                try:
+                    self.engine.warn(key, plan, message)
+                except Exception:
+                    pass
+            if self.tasks:
+                self.idle = GLib.idle_add(self.drain)
+            return False
+
+    def _drain(self):
         # Both bounds matter: slow filesystems and very large directories yield.
         deadline = time.monotonic() + 0.008
         for _ in range(128):
@@ -147,6 +171,7 @@ class Observers:
                 self.idle = None
                 return False
             key, directory, scan_files = self.tasks.popleft()
+            self.active_key = key
             self.queued.discard((key, directory))
             plan = self.plans.get(key)
             if not plan:
@@ -158,9 +183,7 @@ class Observers:
             if (key, directory) not in self.monitors:
                 if len(self.monitors) >= self.limit:
                     self.engine.warn(key, plan, f'監視フォルダー数の上限{self.limit}に達しました。監視範囲を狭めるか定期検査を併用してください。')
-                    self.tasks.clear()
-                    self.queued.clear()
-                    break
+                    continue
                 try:
                     monitor = Gio.File.new_for_path(directory).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
                     monitor.connect('changed', self.event, key)

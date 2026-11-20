@@ -25,12 +25,35 @@ class NotificationRetry:
         self.loaded = False
         self.due = self.attempts = 0
         self.error = ''
+        self.recovery_error = ''
+        self.blocked = False
 
     @property
     def count(self):
         return sum(row['count'] for row in self.rows)
 
     def load(self):
+        if self.loaded:
+            return
+        paths = [self.path.parent / name for name in
+                 ('notification-retry.json', 'notification-retry-pending.json')]
+        valid = []
+        for path in paths:
+            self.path = path
+            self.loaded = False
+            try:
+                self._load()
+                valid.append(path)
+            except (OSError, ValueError) as error:
+                self.recovery_error = '通知の退避ファイルを読み取れません（元ファイルを保持）：' + str(error)[:256]
+                self.error = self.recovery_error
+                report(self.recovery_error)
+        self.loaded = True
+        self.blocked = not valid
+        self.valid_paths = valid
+        self.path = valid[0] if valid else paths[-1]
+
+    def _load(self):
         if self.loaded:
             return
         if self.path.is_symlink():
@@ -90,12 +113,17 @@ class NotificationRetry:
                 report(f'未保存通知{self.count}件の退避に失敗しました：' + self.error)
 
     def persist(self):
+        if self.blocked:
+            raise ValueError('通知の退避先を確認できないため上書きしません。')
         if not self.loaded:
             raise ValueError('既存の通知退避ファイルを確認できないため上書きしません。')
         if self.path.is_symlink():
             raise ValueError('通知の退避ファイルがシンボリックリンクです。')
         if not self.rows:
-            self.path.unlink(missing_ok=True)
+            for path in self.valid_paths:
+                if path.is_symlink():
+                    raise ValueError('通知の退避先が変更されています。')
+                path.unlink(missing_ok=True)
             return
         # ensure_ascii=False keeps the bounded string payload below the byte cap.
         data = json.dumps(dict(version=1,rows=self.rows), ensure_ascii=False).encode('utf-8')
@@ -109,6 +137,11 @@ class NotificationRetry:
                 file.flush()
                 os.fsync(file.fileno())
             temporary.replace(self.path)
+            for path in self.valid_paths:
+                if path != self.path:
+                    if path.is_symlink():
+                        raise ValueError('通知の退避先が変更されています。')
+                    path.unlink(missing_ok=True)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -132,7 +165,7 @@ class NotificationRetry:
                     enqueue(row['title'], body, row['urgency'], count=row['count'])
                 self.rows.remove(row)
                 changed = True
-            self.error = ''
+            self.error = self.recovery_error
             self.attempts = self.due = 0
         except Exception as error:
             self.error = str(error)[:256]

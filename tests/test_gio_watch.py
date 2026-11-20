@@ -103,3 +103,36 @@ class GioWatchTests(unittest.TestCase):
         self.wait(lambda:self.source.idle is None)
         self.assertEqual(len(self.source.monitors),1)
         self.assertIn('上限',self.engine.errors['watch'])
+
+    def test_cap_reports_every_plan_with_uncovered_descendants(self):
+        (self.folder/'child'/'grandchild').mkdir(parents=True)
+        other=self.root/'other';(other/'child').mkdir(parents=True)
+        plans=[('a',self.plan),('b',replace(self.plan,targets=[str(other)]))]
+        self.source.limit=3
+        self.engine.configure(plans,False);self.source.configure(plans)
+        self.wait(lambda:self.source.idle is None)
+        self.assertEqual(len(self.source.monitors),3)
+        self.assertIn('a',self.engine.errors)
+        self.assertIn('b',self.engine.errors)
+
+    def test_inventory_exception_releases_source_and_retries_only_failed_plan(self):
+        import sqlite3
+        from unittest.mock import Mock
+        (self.folder/'child').mkdir();(self.folder/'file').touch()
+        other=self.root/'other';other.mkdir()
+        plans=[('healthy',replace(self.plan,targets=[str(other)])),('failed',self.plan)]
+        self.source.clock=lambda:0
+        self.source.inventory=Mock(side_effect=sqlite3.OperationalError('temporary inventory failure'))
+        self.engine.configure(plans,False);self.source.configure(plans)
+        self.wait(lambda:self.source.idle is None)
+        healthy=self.source.monitors['healthy',str(other)]
+        self.assertIn('failed',self.engine.errors)
+        self.assertNotIn(('failed',str(self.folder)),self.source.monitors)
+        self.source.configure(plans)
+        self.assertFalse(self.source.discovering)
+        self.source.clock=lambda:30;self.source.inventory=Mock()
+        self.source.configure(plans)
+        self.wait(lambda:self.source.idle is None)
+        self.assertIs(self.source.monitors['healthy',str(other)],healthy)
+        self.assertIn(('failed',str(self.folder/'child')),self.source.monitors)
+        self.assertNotIn('failed',self.engine.errors)
