@@ -37,9 +37,15 @@ def engine_status():
 
 class Store:
     def __init__(self, directory=None):
-        base = Path(directory) if directory else Path(
-            os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))
-        ) / 'clamav-gui'
+        if directory is not None:
+            base = Path(directory)
+        else:
+            data = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share')))
+            base = data / 'clamav-gui'
+            legacy = data / 'clam-gui'
+            # Preserve existing installations without copying or replacing data.
+            if not (base / 'history.sqlite3').exists() and (legacy / 'history.sqlite3').is_file():
+                base = legacy
         base.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = base / 'history.sqlite3'
         with self.connect() as db:

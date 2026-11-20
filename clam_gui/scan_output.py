@@ -5,7 +5,8 @@ from .results import warning_signature
 
 
 class ScanOutput:
-    TAIL = 1536 * 1024
+    TAIL = 1024 * 1024
+    THREATS = 256 * 1024
     EVIDENCE = 256 * 1024
     LINE = 64 * 1024
 
@@ -13,6 +14,8 @@ class ScanOutput:
         self.tail = bytearray()
         self.pending = bytearray()
         self.evidence = []
+        self.threats = []
+        self.threat_bytes = self.threat_count = self.retained_threats = 0
         self.evidence_bytes = self.total = self.line_end = self.skipped = 0
         self.first_threat = None
         self.detected = self.issue = self.omitted = False
@@ -49,13 +52,22 @@ class ScanOutput:
     def _line(self, line, end):
         text = line.decode('utf-8', errors='replace').rstrip('\r\n')
         found = text.endswith(' FOUND')
-        if found and not warning_signature(text):
+        threat = found and not warning_signature(text)
+        if threat:
             self.detected = True
+            self.threat_count += 1
+            if self.threat_bytes + len(line) <= self.THREATS:
+                self.threats.append((end, line))
+                self.threat_bytes += len(line)
+            else:
+                self.omitted = True
             if self.first_threat is None:
                 self.first_threat = end, line
         if found or 'WARNING:' in text or 'ERROR' in text or 'Permission denied' in text:
             if not found or warning_signature(text):
                 self.issue = True
+            if threat:
+                return
             if self.evidence_bytes + len(line) <= self.EVIDENCE:
                 self.evidence.append((end, line))
                 self.evidence_bytes += len(line)
@@ -114,7 +126,7 @@ class ScanOutput:
             if newline >= 0:
                 cutoff += newline + 1
                 tail = tail[newline+1:]
-        retained = [(end, line) for end, line in self.evidence if end <= cutoff]
+        retained = [(end, line) for end, line in self.threats + self.evidence if end <= cutoff]
         if self.first_threat and self.first_threat[0] <= cutoff and self.first_threat not in retained:
             retained.append(self.first_threat)
         # Keep the first actual threat ahead of verbose warning evidence so a
@@ -122,6 +134,10 @@ class ScanOutput:
         first = self.first_threat if self.first_threat and self.first_threat[0] <= cutoff else None
         prefix = (first[1] if first else b'') + b''.join(line for end, line in retained if (end, line) != first)
         text = (prefix + tail).decode('utf-8', errors='replace')
+        self.retained_threats = sum(line.endswith(' FOUND') and not warning_signature(line) for line in text.splitlines())
+        if self.retained_threats < self.threat_count:
+            text = (f'WARNING: 脅威の報告{self.threat_count}件に対し、検出明細は{self.retained_threats}件のみ保持できました。'
+                    '検出明細の保存上限に達したため、全件を特定できません。検出なしではありません。\n' + text)
         if cutoff or self.omitted:
             text = 'WARNING: 出力の一部を省略しました。保持できた検出・警告と末尾のログを表示します。\n' + text
         if self.issue and 'WARNING:' not in text and 'ERROR' not in text and not any(warning_signature(line) for line in text.splitlines()):
