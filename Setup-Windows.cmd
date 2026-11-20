@@ -8,6 +8,13 @@ if not exist "%MSYS2_ROOT%\usr\bin\bash.exe" (
 if not exist "%MSYS2_ROOT%\usr\bin\bash.exe" goto failed
 "%MSYS2_ROOT%\usr\bin\bash.exe" -lc "pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-python-gobject mingw-w64-ucrt-x86_64-gtk4"
 if errorlevel 1 goto failed
+pushd "%~dp0"
+"%MSYS2_ROOT%\ucrt64\bin\python.exe" -m clam_gui.platforms.windows_engine
+if errorlevel 1 (
+  popd
+  goto failed
+)
+popd
 call "%~dp0ClamAV-GUI.cmd"
 exit /b %errorlevel%
 :failed

@@ -9,7 +9,7 @@ import tempfile
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from .engine import executable
+from .engine import executable, startup_error
 import sqlite3
 import subprocess
 from .retention import DEFAULTS as AUTOMATION_DEFAULTS, validate as validate_automation, prune, initialize as initialize_retention
@@ -28,9 +28,10 @@ def engine_status():
         return 'ClamAVが見つかりません。OS側への導入が必要です。'
     try:
         result = subprocess.run([binary, '--version'], capture_output=True,
-                                text=True, timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                                text=True, timeout=10,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         return (result.stdout.strip() if result.returncode == 0 else
-                'ClamAVの確認に失敗しました。')
+                startup_error(result.returncode) or 'ClamAVの確認に失敗しました。')
     except (OSError, subprocess.TimeoutExpired):
         return 'ClamAVを起動・確認できません。'
 

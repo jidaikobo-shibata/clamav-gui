@@ -9,7 +9,7 @@ import time
 import xml.etree.ElementTree as ET
 
 from ..definitions import AutoUpdateState, definition_update_label
-from ..engine import database, executable
+from ..engine import database, executable, startup_error
 from ..notifications import definition_status
 from .windows_tasks import Scheduler, Task, trigger_for
 
@@ -48,6 +48,9 @@ class Packages:
             args.append('--accept-package-agreements')
         result = subprocess.run(args, capture_output=True, encoding='utf-8', errors='replace',
                                 creationflags=subprocess.CREATE_NO_WINDOW)
+        if command == 'install' and result.returncode == 0:
+            from .windows_engine import prepare_install
+            prepare_install()
         return result.stdout + result.stderr, result.returncode
 
 
@@ -83,7 +86,7 @@ class Updates:
                 log.seek(max(0, size - 65536))
                 output = log.read().decode('utf-8', errors='replace')
                 if code:
-                    raise RuntimeError(output or f'FreshClam終了コード {code}')
+                    raise RuntimeError(startup_error(code) or output or f'FreshClam終了コード {code}')
                 if not all(any((folder / (name + ext)).is_file() for ext in ('.cvd', '.cld'))
                            for name in ('daily', 'main', 'bytecode')):
                     raise RuntimeError('更新後の定義ファイルを確認できません。')
