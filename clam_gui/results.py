@@ -75,6 +75,18 @@ def warning_signature(line):
         'Heuristics.Broken.'))
 
 
+def output_was_truncated(output):
+    return bool(re.search(r'^(?:出力が大きいため(?:末尾のみ|先頭と末尾のみ)保存しています。|'
+                          r'WARNING: 出力の一部を省略しました。)', output, re.M))
+
+
+def detection_uncertain(output, status=''):
+    if status.startswith('要確認・内訳不明'):
+        return True
+    return output_was_truncated(output) and any(
+        int(value) > 0 for value in re.findall(r'^Infected files:\s*(\d+)\s*$', output, re.M))
+
+
 def has_detection(status, output):
     if isinstance(status, ScanStatus):
         return status.assessment.detected
@@ -83,7 +95,7 @@ def has_detection(status, output):
         return any(not warning_signature(line) for line in lines)
     infected = re.search(r'^Infected files:\s*(\d+)\s*$', output, re.M)
     if infected:
-        return int(infected[1]) > 0
+        return int(infected[1]) > 0 and not detection_uncertain(output)
     return status.startswith('検出あり')
 
 
@@ -97,9 +109,12 @@ def summarize(code, output, cancelled=False):
     threats = [line for line in found if line not in warnings]
     errors = total('Total errors')
     incomplete = code not in (0, 1) or errors > 0 or 'WARNING:' in output or 'ERROR' in output
-    detected = bool(threats) or (total('Infected files') > 0 and not warnings)
+    uncertain = not threats and detection_uncertain(output)
+    detected = bool(threats) or (total('Infected files') > 0 and not warnings and not uncertain)
     if cancelled:
         title = '検査を中止しました（未検査の対象が残っています）'
+    elif uncertain:
+        title = '要確認・内訳不明：検出情報がありますが、明細不足のため内訳を確認できません'
     elif incomplete or limits or encrypted:
         title = '検出あり・検査不完了' if detected else '検査不完了'
     elif detected:
@@ -121,6 +136,6 @@ def summarize(code, output, cancelled=False):
         details.append(f'検査エラーが{errors}件あります。対象と理由は詳細ログを確認してください。')
     if 'Permission denied' in output:
         details.append('アクセス権限がないため、読み取れない対象があります。')
-    kind = (ResultKind.CANCELLED if cancelled else ResultKind.INCOMPLETE if incomplete or limits or encrypted
+    kind = (ResultKind.CANCELLED if cancelled else ResultKind.INCOMPLETE if incomplete or limits or encrypted or uncertain
             else ResultKind.DETECTED if detected else ResultKind.WARNING if warnings or code == 1 else ResultKind.CLEAN)
     return ScanStatus('\n'.join([title] + details), kind, detected)

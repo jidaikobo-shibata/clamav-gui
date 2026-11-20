@@ -45,13 +45,16 @@ class HistoryController:
         self.entries = entries or []
         self.changed(self.entries)
         for entry in self.entries:
-            label = Gtk.Label(label=entry.date_label(), xalign=0,
+            attention = entry.attention_label()
+            label = Gtk.Label(label=entry.date_label() + ('\n' + attention if attention else ''), xalign=0,
                               margin_start=10, margin_end=10, margin_top=12, margin_bottom=12)
-            if entry.is_detected():
+            if attention:
                 attributes = Pango.AttrList()
                 attributes.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
                 label.set_attributes(attributes)
-                label.update_property([Gtk.AccessibleProperty.LABEL], [entry.date_label() + ' 検出あり'])
+                label.update_property([Gtk.AccessibleProperty.LABEL], [entry.date_label() + ' ' + attention])
+            if entry.is_uncertain():
+                label.set_tooltip_text('検出情報がありますが、明細不足のため内訳を確認できません。再検査してください。')
             self.listing.append(label)
         index = 0 if self.latest_requested else next((i for i, entry in enumerate(self.entries) if entry.id == old_id), 0)
         self.latest_requested = False
@@ -87,7 +90,7 @@ class HistoryController:
         elif entry is None:
             text = 'この履歴は整理されたため参照できません。履歴を再読み込みしてください。'
         else:
-            text = entry.date_label() + '\n' + entry.status + '\n\n' + entry.target + '\n\n' + entry.output
+            text = entry.attention_notice() + entry.date_label() + '\n' + entry.status + '\n\n' + entry.target + '\n\n' + entry.output
         self.text.get_buffer().set_text(text)
 
     def close(self):

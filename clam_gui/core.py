@@ -17,7 +17,7 @@ from .runtime import track_scan
 from .platforms import get_backend
 from .settings import Preferences
 from .scan_output import ScanOutput
-from .results import ResultKind, ScanStatus, assess, has_detection, warning_signature, summarize
+from .results import ResultKind, ScanStatus, assess, has_detection, warning_signature, summarize, output_was_truncated, detection_uncertain
 from .mailboxes import MAILBOX_NOTE, mailbox_findings, mailbox_guidance
 from .options import DEFAULTS, supported_options, option_arguments, describe_options, LIMITS, validate_limits, limit_arguments, describe_limits
 
@@ -145,16 +145,32 @@ class Store:
             ids = sorted({row[0] for row in modern + legacy}, reverse=True)[:100]
             if not ids:
                 return []
-            rows = db.execute("SELECT rowid,started,completed_at,detected,'',status,'',result_kind FROM scans WHERE rowid IN ("+
+            rows = db.execute("SELECT rowid,started,completed_at,detected,'',status,'',result_kind,"
+                              "CASE WHEN COALESCE(detected,0)=0 THEN substr(CAST(output AS BLOB),1,256) ELSE X'' END "
+                              "FROM scans WHERE rowid IN ("+
                               ','.join('?' for _ in ids)+') ORDER BY rowid DESC', ids).fetchall()
             result = []
             for row in rows:
-                entry = HistoryEntry(*row)
+                entry = HistoryEntry(*row[:8])
                 if entry.completed_at is None or entry.detected is None:
                     # Old logs need one-at-a-time decoding; never retain all their bodies.
                     body = db.execute('SELECT output FROM scans WHERE rowid=?', (entry.id,)).fetchone()
                     full = replace(entry, output=body[0] if body else '')
-                    entry = replace(entry, completed_at=full.completion_timestamp(), detected=int(full.is_detected()))
+                    entry = replace(entry, completed_at=full.completion_timestamp(), detected=int(full.is_detected()),
+                                    uncertain=full.is_uncertain())
+                elif not entry.is_detected():
+                    prefix = (row[8] or b'').decode('utf-8', errors='replace')
+                    probe = prefix
+                    if output_was_truncated(prefix):
+                        # Only a small head/tail probe is retained for modern rows;
+                        # do not load all log bodies just to render the history list.
+                        tail = db.execute('SELECT substr(CAST(output AS BLOB),-16384), '
+                                          'substr(CAST(output AS BLOB),instr(CAST(output AS BLOB),?),2048) '
+                                          'FROM scans WHERE rowid=?',
+                                          (b'\n----------- SCAN SUMMARY -----------', entry.id)).fetchone()
+                        probe += '\n' + (tail[0] or b'').decode('utf-8', errors='replace')
+                        probe += '\n' + (tail[1] or b'').decode('utf-8', errors='replace')
+                    entry = replace(entry, uncertain=detection_uncertain(probe, entry.status))
                 result.append(entry)
             return result
 
@@ -283,6 +299,7 @@ class HistoryEntry:
     status: str
     output: str
     result_kind: str | None = None
+    uncertain: bool | None = None
 
     def completion_timestamp(self):
         value = self.completed_at
@@ -303,6 +320,23 @@ class HistoryEntry:
 
     def is_detected(self):
         return bool(self.detected) if self.detected is not None else has_detection(self.status, self.output)
+
+    def is_uncertain(self):
+        if self.is_detected():
+            return False
+        return self.uncertain if self.uncertain is not None else detection_uncertain(self.output, self.status)
+
+    def attention_label(self):
+        if self.is_detected():
+            return '検出あり'
+        return '要確認・内訳不明' if self.is_uncertain() else ''
+
+    def attention_notice(self):
+        if not self.is_uncertain():
+            return ''
+        return ('要確認・内訳不明\nClamAVは検出情報を報告していますが、ログの一部が省略されているため、'
+                '脅威の有無や内訳を確認できません。「検出なし」とは判断できません。'
+                '検出明細を保持できる状態で再検査してください。\n\n--- 保存された記録 ---\n')
 
 
 @dataclass

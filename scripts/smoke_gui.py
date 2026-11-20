@@ -145,6 +145,29 @@ def check():
         db.execute('DELETE FROM scans WHERE rowid=?', (latest,))
     app.history(None)
     settle_history()
+    # A legacy false detection flag must not hide truncated positive summaries.
+    from clam_gui.results import ScanStatus, ResultKind
+    truncated = '出力が大きいため末尾のみ保存しています。' + chr(10)
+    truncated += '/synthetic/large: Heuristics.Limits.Exceeded.MaxFileSize FOUND' + chr(10)
+    truncated += 'Infected files: 57' + chr(10)
+    app.store.save('2026-11-20T02:00:00+09:00', plan.describe(),
+                   ScanStatus('検査不完了', ResultKind.INCOMPLETE), truncated, key)
+    app.history(None, latest=True)
+    settle_history()
+    caution_label = app.history_list.get_row_at_index(0).get_child()
+    assert caution_label.get_attributes() is not None
+    assert '要確認・内訳不明' in caution_label.get_text()
+    assert caution_label.get_tooltip_text()
+    buffer = app.result.get_buffer()
+    caution_text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+    assert caution_text.startswith('要確認・内訳不明')
+    assert '「検出なし」とは判断できません' in caution_text
+    with app.store.connect() as db:
+        original = db.execute('SELECT detected,status,output FROM scans ORDER BY rowid DESC LIMIT 1').fetchone()
+        assert original == (0, '検査不完了', truncated)
+        db.execute('DELETE FROM scans WHERE rowid=?', (app.log_entries[0].id,))
+    app.history(None)
+    settle_history()
     def descendants(widget):
         yield widget
         child = widget.get_first_child()
