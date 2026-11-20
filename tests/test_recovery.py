@@ -273,3 +273,129 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(monitor.stopping)
         self.assertIsNone(monitor.failure)
         self.assertTrue(monitor.last_state['notifications']['error'])
+
+    def test_checkpoint_retry_keeps_monitor_alive_and_respects_backoff(self):
+        from clam_gui.background import put_preference
+        monitor=self.monitor();monitor.observers.configure=Mock()
+        put_preference(self.store,'background-enabled',True)
+        with patch('clam_gui.monitor.time.monotonic',return_value=100) as clock, \
+             patch.object(monitor.checkpoints,'complete_baseline',side_effect=sqlite3.OperationalError('database is locked')) as baseline, \
+             patch.object(monitor.engine,'tick') as tick:
+            self.assertTrue(monitor.checked_tick())
+            self.assertEqual(monitor.checkpoint_due,105)
+            self.assertTrue(monitor.checkpoint_error)
+            clock.return_value=101
+            self.assertTrue(monitor.checked_tick());self.assertEqual(baseline.call_count,1)
+            clock.return_value=105
+            self.assertTrue(monitor.checked_tick());self.assertEqual(baseline.call_count,2)
+            self.assertEqual(monitor.checkpoint_due,115)
+            self.assertEqual(tick.call_count,3)
+        self.assertFalse(monitor.stopping);self.assertIsNone(monitor.failure)
+        self.assertIn('再開確認情報',monitor.last_state['statuses']['external-media'])
+        with patch('clam_gui.monitor.time.monotonic',return_value=115):
+            self.assertTrue(monitor.checked_tick())
+        self.assertEqual(monitor.checkpoint_error,'')
+        self.assertEqual(monitor.checkpoint_attempts,0)
+
+    def test_real_database_lock_retains_dirty_metadata_and_recovers(self):
+        from clam_gui.core import Plan
+        from clam_gui.background import put_preference
+        monitor=self.monitor();monitor.observers.configure=Mock()
+        folder=self.root/'watch';folder.mkdir();file=folder/'file';file.touch()
+        plan=Plan('test',[str(folder)],[],kind='watch');plans=[('p',plan)]
+        monitor.checkpoints.configure(plans);monitor.engine.configure(plans,False)
+        monitor.observers.monitors={('p',str(folder)):object()}
+        monitor.checkpoints.inventory('p',str(file))
+        put_preference(self.store,'background-enabled',True)
+        with patch('clam_gui.monitor.watched_plans',return_value=plans), \
+             patch('clam_gui.monitor.time.monotonic',return_value=100) as clock:
+            with self.store.connect() as locker:
+                locker.execute('BEGIN IMMEDIATE')
+                started=time.perf_counter()
+                self.assertTrue(monitor.checked_tick())
+                self.assertLess(time.perf_counter()-started,1)
+                self.assertTrue(monitor.checkpoints.dirty)
+                self.assertNotIn('p',monitor.checkpoints.ready)
+                self.assertFalse(monitor.stopping)
+            clock.return_value=105
+            self.assertTrue(monitor.checked_tick())
+        self.assertFalse(monitor.checkpoints.dirty)
+        self.assertIn('p',monitor.checkpoints.ready)
+        self.assertEqual(monitor.checkpoint_error,'')
+        self.assertIsNotNone(monitor.last_state)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM monitor_files').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT count(*) FROM monitor_roots').fetchone()[0],1)
+
+    def test_scan_completion_during_backoff_is_saved_on_baseline_retry(self):
+        monitor=self.monitor()
+        with patch('clam_gui.monitor.time.monotonic',return_value=100) as clock, \
+             patch.object(monitor.checkpoints,'scanned',side_effect=sqlite3.OperationalError('locked')):
+            monitor.save_checkpoints()
+            monitor.save_checkpoints()
+            self.assertTrue(monitor.checkpoint_scans_pending)
+        with patch('clam_gui.monitor.time.monotonic',return_value=105), \
+             patch.object(monitor.checkpoints,'scanned') as scanned:
+            monitor.save_checkpoints(baseline=True)
+            scanned.assert_called_once()
+        self.assertFalse(monitor.checkpoint_scans_pending)
+
+    def test_inventory_failure_preserves_healthy_gio_monitor_on_next_tick(self):
+        from gi.repository import GLib
+        from clam_gui.gio_watch import Observers
+        from clam_gui.core import Plan
+        from clam_gui.background import put_preference
+        class Volumes:
+            def connect(self,*args):return len(args)
+            def disconnect(self,*args):pass
+            def get_mounts(self):return []
+        failing=self.root/'failing';failing.mkdir()
+        healthy=self.root/'healthy';healthy.mkdir()
+        for index in range(520):(failing/str(index)).touch()
+        plans=[('healthy',Plan('healthy',[str(healthy)],[],kind='watch')),
+               ('failing',Plan('failing',[str(failing)],[],kind='watch'))]
+        monitor=Monitor(self.store,observers=lambda engine:Observers(engine,Volumes()),notifier=Mock())
+        self.addCleanup(monitor.shutdown)
+        monitor.observers.clock=lambda:100
+        monitor.checkpoints.configure(plans)
+        put_preference(self.store,'background-enabled',True)
+        with patch('clam_gui.monitor.watched_plans',return_value=plans), \
+             patch('clam_gui.monitor.time.monotonic',return_value=100), \
+             patch.object(monitor.engine,'tick'), \
+             patch.object(monitor.checkpoints,'flush',side_effect=sqlite3.OperationalError('database is locked')):
+            self.assertTrue(monitor.checked_tick())
+            deadline=time.perf_counter()+3
+            while monitor.observers.idle is not None and time.perf_counter()<deadline:
+                GLib.MainContext.default().iteration(False)
+            self.assertIsNone(monitor.observers.idle)
+            self.assertIn('failing',monitor.engine.errors)
+            watcher=monitor.observers.monitors['healthy',str(healthy)]
+            self.assertTrue(monitor.checked_tick())
+            self.assertFalse(monitor.stopping)
+            self.assertIs(monitor.observers.monitors['healthy',str(healthy)],watcher)
+            file=healthy/'new';file.touch()
+            deadline=time.perf_counter()+3
+            while ('healthy',str(file)) not in monitor.engine.queue.pending and time.perf_counter()<deadline:
+                GLib.MainContext.default().iteration(False)
+            self.assertIn(('healthy',str(file)),monitor.engine.queue.pending)
+
+    def test_failed_baseline_transaction_does_not_mark_plan_ready(self):
+        from clam_gui.core import Plan
+        monitor=self.monitor()
+        folder=self.root/'watch';folder.mkdir()
+        plans=[('p',Plan('test',[str(folder)],[],kind='watch'))]
+        monitor.checkpoints.configure(plans);monitor.engine.configure(plans,False)
+        monitors={('p',str(folder)):object()}
+        connect=self.store.connect
+        @contextmanager
+        def failing_commit():
+            with connect() as db:
+                yield db
+                raise sqlite3.OperationalError('commit failed')
+        with patch.object(self.store,'connect',failing_commit), self.assertRaises(sqlite3.Error):
+            monitor.checkpoints.complete_baseline(monitors)
+        self.assertNotIn('p',monitor.checkpoints.ready)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM monitor_roots').fetchone()[0],0)
+        monitor.checkpoints.complete_baseline(monitors)
+        self.assertIn('p',monitor.checkpoints.ready)

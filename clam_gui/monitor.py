@@ -71,6 +71,7 @@ class Checkpoints:
     def flush(self):
         if self.dirty:
             with self.store.connect() as db:
+                db.execute('PRAGMA busy_timeout=0')
                 db.executemany('INSERT INTO monitor_files VALUES (?,?,?) ON CONFLICT(id,path) DO UPDATE SET stamp=excluded.stamp',
                                [(key, path, stamp) for (key, path), stamp in self.dirty.items()])
             self.dirty.clear()
@@ -79,11 +80,14 @@ class Checkpoints:
         self.flush()
         if self.ready.issuperset(self.roots):
             return
+        completed = set()
         with self.store.connect() as db:
+            db.execute('PRAGMA busy_timeout=0')
             for key, config in self.roots.items():
                 if key not in self.ready and key not in self.engine.errors and (key, str(self.engine.plans[key].targets[0])) in monitors:
                     db.execute('INSERT INTO monitor_roots VALUES (?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config', (key, config))
-                    self.ready.add(key)
+                    completed.add(key)
+        self.ready.update(completed)
 
     def scanned(self):
         for ident, stamp in self.engine.queue.completed.items():
@@ -124,6 +128,10 @@ class Monitor:
         self.last_state = None
         self.control = True
         self.command_value = {}
+        self.checkpoint_due = self.checkpoint_attempts = 0
+        self.checkpoint_error = ''
+        self.checkpoint_scans_pending = False
+        self.publish_due = 0
         self.generation = __import__('uuid').uuid4().hex
 
     def changed(self):
@@ -135,7 +143,28 @@ class Monitor:
         if notice:
             self.notification_retry.add(notice)
             self.notification_retry.drain(self.notifier)
-        self.checkpoints.scanned()
+        self.save_checkpoints()
+
+    def save_checkpoints(self, *, baseline=False):
+        if not baseline:
+            self.checkpoint_scans_pending = True
+        now = time.monotonic()
+        if now < self.checkpoint_due:
+            return
+        try:
+            if self.checkpoint_scans_pending:
+                self.checkpoints.scanned()
+                self.checkpoint_scans_pending = False
+            if baseline:
+                self.checkpoints.complete_baseline(self.observers.monitors)
+        except sqlite3.Error as error:
+            self.checkpoint_attempts += 1
+            self.checkpoint_due = now + min(300, 5 * 2**min(self.checkpoint_attempts-1, 6))
+            self.checkpoint_error = '再開確認情報を保存できません。自動で再試行します：' + str(error)[:256]
+            report(self.checkpoint_error)
+        else:
+            self.checkpoint_due = self.checkpoint_attempts = 0
+            self.checkpoint_error = ''
 
     def flush(self, force=False):
         for key in self.notices.due(force):
@@ -180,7 +209,7 @@ class Monitor:
             self.started = True
             self.last_config_time = now
         if not getattr(self.observers, 'discovering', self.observers.tasks):
-            self.checkpoints.complete_baseline(self.observers.monitors)
+            self.save_checkpoints(baseline=True)
         command = self.command_value
         if command and command.get('token') != self.command:
             self.command = command.get('token')
@@ -194,6 +223,8 @@ class Monitor:
         statuses[MEDIA_ID] = self.engine.status(MEDIA_ID)
         if not __import__('shutil').which('clamscan'):
             statuses = {key: 'ClamAV未導入：検査待ちを保持しています' for key in statuses}
+        if self.checkpoint_error:
+            statuses = {key: value + '\n' + self.checkpoint_error for key, value in statuses.items()}
         # Publish changed state promptly; keep the eight-second lease fresh at
         # three-second intervals without rewriting identical state twice a second.
         delivery = dict(self.outbox.cached_state())
@@ -201,9 +232,19 @@ class Monitor:
         delivery['error'] = self.notification_retry.error or delivery.get('error', '')
         state = dict(generation=self.generation, revision=self.revision, statuses=statuses,
                      active=self.engine.active_key, notifications=delivery)
-        if state != self.last_state or now - self.last_publish >= 3:
-            put_preference(self.store, 'background-state', dict(updated=time.time(), **state))
-            self.last_state, self.last_publish = state, now
+        if now >= self.publish_due and (state != self.last_state or now - self.last_publish >= 3):
+            try:
+                # A locked database also prevents heartbeat writes; keep watching
+                # and leave the previous published state untouched until retry.
+                with self.store.connect() as db:
+                    db.execute('PRAGMA busy_timeout=0')
+                    self.store.preferences.set('background-state', dict(updated=time.time(), **state), db=db)
+            except sqlite3.Error as error:
+                self.publish_due = now + 5
+                report('常駐状態の保存を再試行します：' + str(error))
+            else:
+                self.publish_due = 0
+                self.last_state, self.last_publish = state, now
         return True
 
     def checked_tick(self):

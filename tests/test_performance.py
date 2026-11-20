@@ -153,7 +153,7 @@ class PerformanceTests(unittest.TestCase):
         monitor=Monitor(self.store,observers=Source,notifier=lambda *args:None)
         self.addCleanup(monitor.lease.close);self.addCleanup(monitor.outbox.close)
         put_preference(self.store,'background-enabled',True)
-        with patch('clam_gui.monitor.time.monotonic',return_value=100) as clock, patch('clam_gui.monitor.put_preference',wraps=put_preference) as put:
+        with patch('clam_gui.monitor.time.monotonic',return_value=100) as clock, patch.object(self.store.preferences,'set',wraps=self.store.preferences.set) as put:
             monitor.tick()
             for _ in range(4): monitor.tick()
             self.assertEqual(put.call_count,1)
