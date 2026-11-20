@@ -38,6 +38,9 @@ class Observers:
         self.tasks = deque()
         self.queued = set()
         self.overflow = set()
+        self.capacity_pending = {}
+        self.recovering = {}
+        self.recovery_new = set()
         self.idle = None
         self.current = None
         self.active_key = None
@@ -59,6 +62,9 @@ class Observers:
         self.queued = {ident for ident in self.queued if ident[0] != key}
         self.overflow.discard(key)
         self.retry.pop(key, None)
+        self.capacity_pending.pop(key, None)
+        self.recovering.pop(key, None)
+        self.recovery_new = {ident for ident in self.recovery_new if ident[0] != key}
 
     def configure(self, plans):
         plans = dict(plans)
@@ -75,6 +81,19 @@ class Observers:
                 self.enqueue(key, plan.targets[0], False)
                 continue
             root = key, str(plan.targets[0])
+            if key in self.capacity_pending:
+                # One marker per plan bounds recovery memory. Re-enumerate the
+                # current scope once capacity is free, retaining existing watches.
+                if len(self.monitors) < self.limit and not any(ident[0] == key for ident in self.queued):
+                    previous = self.capacity_pending.pop(key)
+                    self.recovering[key] = previous
+                    self.retry.pop(key, None)
+                    if not self.enqueue(key, plan.targets[0], False):
+                        self.recovering.pop(key, None)
+                        self.capacity_pending[key] = previous
+                continue
+            if key in self.recovering:
+                continue
             if root in self.monitors or root in self.queued:
                 continue
             due, delay = self.retry.get(key, (now, 15))
@@ -85,14 +104,20 @@ class Observers:
                 self.retry[key] = now + delay, delay
                 self.enqueue(key, plan.targets[0], False)
 
+    def capacity_message(self):
+        return f'監視フォルダーまたは監視準備待ちフォルダーの数が上限{self.limit}に達しました。空きができたら自動で再試行します。フォルダー全体の検査を併用してください。'
+
     def enqueue(self, key, path, scan_files):
         ident = key, str(path)
         if ident not in self.queued:
             if len(self.queued) >= self.limit:
                 plan = self.plans.get(key)
-                if plan and key not in self.overflow:
-                    self.overflow.add(key)
-                    self.engine.warn(key, plan, f'監視準備の待ちフォルダー数が上限{self.limit}に達しました。一部を監視できません。監視範囲を狭め、フォルダー全体の検査を併用してください。')
+                if plan:
+                    message = self.capacity_message()
+                    self.capacity_pending[key] = message
+                    if key not in self.overflow:
+                        self.overflow.add(key)
+                        self.engine.warn(key, plan, message)
                 return False
             self.queued.add(ident)
             self.tasks.append((key, str(path), scan_files))
@@ -109,7 +134,19 @@ class Observers:
             key, directory, _, entries, _ = self.current
             entries.close()
             self.queued.discard((key, directory))
+            self.recovery_new.discard((key, directory))
             self.current = None
+
+    def finish_recoveries(self):
+        for key, previous in list(self.recovering.items()):
+            if any(ident[0] == key for ident in self.queued):
+                continue
+            self.recovering.pop(key)
+            # Preserve both a repeated capacity failure and unrelated warnings.
+            if key not in self.capacity_pending:
+                self.overflow.discard(key)
+                if self.engine.errors.get(key) == previous:
+                    self.engine.errors.pop(key, None)
 
     def drain(self):
         try:
@@ -157,7 +194,7 @@ class Observers:
                             elif entry.is_file(follow_symlinks=False) and allowed_path(plan, entry.path):
                                 if self.inventory:
                                     self.inventory(key, entry.path)
-                                if scan_files:
+                                if scan_files or (key, directory) in self.recovery_new:
                                     self.engine.file_event(key, entry.path)
                 except StopIteration:
                     self.finish_directory()
@@ -168,6 +205,7 @@ class Observers:
                     return True
                 continue
             if not self.tasks:
+                self.finish_recoveries()
                 self.idle = None
                 return False
             key, directory, scan_files = self.tasks.popleft()
@@ -182,12 +220,16 @@ class Observers:
                 continue
             if (key, directory) not in self.monitors:
                 if len(self.monitors) >= self.limit:
-                    self.engine.warn(key, plan, f'監視フォルダー数の上限{self.limit}に達しました。監視範囲を狭めるか定期検査を併用してください。')
+                    message = self.capacity_message()
+                    self.capacity_pending[key] = message
+                    self.engine.warn(key, plan, message)
                     continue
                 try:
                     monitor = Gio.File.new_for_path(directory).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
                     monitor.connect('changed', self.event, key)
                     self.monitors[key, directory] = monitor
+                    if key in self.recovering:
+                        self.recovery_new.add((key, directory))
                 except GLib.Error as error:
                     self.engine.warn(key, plan, 'フォルダーを監視できません：' + str(error))
                     continue
@@ -200,6 +242,7 @@ class Observers:
                     self.retry.pop(key, None)
             except OSError as error:
                 monitor = self.monitors.pop((key, directory), None)
+                self.recovery_new.discard((key, directory))
                 if monitor:
                     monitor.cancel()
                 self.engine.warn(key, plan, '監視フォルダーを読み取れません：' + str(error))
@@ -214,6 +257,7 @@ class Observers:
         for ident in list(self.monitors):
             if ident[0] == key and inside(ident[1]):
                 self.monitors.pop(ident).cancel()
+                self.recovery_new.discard(ident)
         if self.current and self.current[0] == key and inside(self.current[1]):
             self.finish_directory()
         self.tasks = deque(task for task in self.tasks if not (task[0] == key and inside(task[1])))
@@ -298,3 +342,6 @@ class Observers:
         self.queued.clear()
         self.overflow.clear()
         self.retry.clear()
+        self.capacity_pending.clear()
+        self.recovering.clear()
+        self.recovery_new.clear()

@@ -136,3 +136,103 @@ class GioWatchTests(unittest.TestCase):
         self.assertIs(self.source.monitors['healthy',str(other)],healthy)
         self.assertIn(('failed',str(self.folder/'child')),self.source.monitors)
         self.assertNotIn('failed',self.engine.errors)
+
+    def capacity_setup(self, *, extra_depth=False):
+        deep=self.folder/'child'/'deep';deep.mkdir(parents=True)
+        if extra_depth:(deep/'below').mkdir()
+        other=self.root/'other';other.mkdir()
+        healthy=self.root/'healthy';healthy.mkdir()
+        (self.folder/'existing').touch()
+        plans=[('a',self.plan),('b',replace(self.plan,targets=[str(other)])),
+               ('c',replace(self.plan,targets=[str(healthy)]))]
+        self.source.clock=lambda:0;self.source.limit=4
+        self.engine.configure(plans,False);self.source.configure(plans)
+        self.wait(lambda:self.source.idle is None)
+        self.assertIn('a',self.source.capacity_pending)
+        self.assertNotIn(('a',str(deep)),self.source.monitors)
+        return plans,deep,other,healthy
+
+    def test_freed_capacity_recovers_missing_subtree_without_replacing_healthy_watches(self):
+        plans,deep,other,healthy=self.capacity_setup()
+        root_watch=self.source.monitors['a',str(self.folder)]
+        healthy_watch=self.source.monitors['c',str(healthy)]
+        gap=deep/'arrived-during-gap';gap.touch()
+        plans=[item for item in plans if item[0]!='b']
+        self.engine.configure(plans,False);self.source.configure(plans)
+        self.wait(lambda:self.source.idle is None)
+        self.assertEqual(len(self.source.monitors),4)
+        self.assertIs(self.source.monitors['a',str(self.folder)],root_watch)
+        self.assertIs(self.source.monitors['c',str(healthy)],healthy_watch)
+        self.assertIn(('a',str(deep)),self.source.monitors)
+        self.assertIn(('a',str(gap)),self.engine.queue.pending)
+        self.assertNotIn(('a',str(self.folder/'existing')),self.engine.queue.pending)
+        self.assertNotIn('a',self.engine.errors)
+        self.assertFalse(self.source.capacity_pending)
+        self.assertFalse(self.source.recovering);self.assertFalse(self.source.recovery_new)
+        fresh=deep/'fresh';fresh.touch()
+        self.wait(lambda:('a',str(fresh)) in self.engine.queue.pending)
+
+    def test_full_capacity_keeps_bounded_recovery_marker_without_rescanning(self):
+        plans,deep,other,healthy=self.capacity_setup()
+        watches=dict(self.source.monitors)
+        for now in (1,30,300,600):
+            self.source.clock=lambda:now
+            self.source.configure(plans)
+            self.assertIsNone(self.source.idle)
+            self.assertEqual(self.source.monitors,watches)
+            self.assertEqual(set(self.source.capacity_pending),{'a'})
+            self.assertIn('上限',self.engine.errors['a'])
+        self.source.configure([])
+        self.assertFalse(self.source.capacity_pending)
+        self.assertFalse(self.source.recovering);self.assertFalse(self.source.recovery_new)
+
+    def test_partial_recovery_keeps_warning_until_remaining_capacity_is_freed(self):
+        plans,deep,other,healthy=self.capacity_setup(extra_depth=True)
+        plans=[item for item in plans if item[0]!='b']
+        self.engine.configure(plans,False);self.source.configure(plans)
+        self.wait(lambda:self.source.idle is None)
+        self.assertIn(('a',str(deep)),self.source.monitors)
+        self.assertNotIn(('a',str(deep/'below')),self.source.monitors)
+        self.assertIn('a',self.source.capacity_pending);self.assertIn('a',self.engine.errors)
+        plans=plans[:1]
+        self.engine.configure(plans,False);self.source.configure(plans)
+        self.wait(lambda:self.source.idle is None)
+        self.assertIn(('a',str(deep/'below')),self.source.monitors)
+        self.assertNotIn('a',self.source.capacity_pending);self.assertNotIn('a',self.engine.errors)
+
+    def test_removed_directory_capacity_is_reused_by_another_plan(self):
+        plans,deep,other,healthy=self.capacity_setup()
+        other.rmdir()
+        self.wait(lambda:('b',str(other)) not in self.source.monitors)
+        self.source.configure(plans)
+        self.wait(lambda:self.source.idle is None)
+        self.assertIn(('a',str(deep)),self.source.monitors)
+        self.assertNotIn('a',self.engine.errors)
+        self.assertIn('b',self.engine.errors)
+
+    def test_recovery_preserves_unrelated_plan_warning(self):
+        plans,deep,other,healthy=self.capacity_setup()
+        self.engine.errors['a']='別の警告を保持する'
+        plans=[item for item in plans if item[0]!='b']
+        self.engine.configure(plans,False);self.source.configure(plans)
+        self.wait(lambda:self.source.idle is None)
+        self.assertIn(('a',str(deep)),self.source.monitors)
+        self.assertEqual(self.engine.errors['a'],'別の警告を保持する')
+        self.assertNotIn('a',self.source.capacity_pending)
+
+    def test_queue_capacity_overflow_also_recovers_after_another_plan_is_removed(self):
+        for index in range(3):(self.folder/str(index)).mkdir()
+        other=self.root/'other';other.mkdir()
+        plans=[('a',self.plan),('b',replace(self.plan,targets=[str(other)]))]
+        self.source.limit=4
+        self.engine.configure(plans,False);self.source.configure(plans)
+        self.wait(lambda:self.source.idle is None)
+        self.assertIn('a',self.source.overflow)
+        self.assertIn('a',self.source.capacity_pending)
+        self.assertEqual(len(self.source.monitors),4)
+        plans=plans[:1]
+        self.engine.configure(plans,False);self.source.configure(plans)
+        self.wait(lambda:self.source.idle is None)
+        for index in range(3):self.assertIn(('a',str(self.folder/str(index))),self.source.monitors)
+        self.assertNotIn('a',self.engine.errors)
+        self.assertFalse(self.source.capacity_pending)
