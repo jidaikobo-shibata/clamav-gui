@@ -133,22 +133,30 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         layout.append(footer)
         self.notice = Gtk.Label(xalign=0, wrap=True, selectable=True, visible=False)
         footer.append(self.notice)
-        definitions = Gtk.Box(spacing=12, halign=Gtk.Align.END)
+        self.footer_status = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE,
+                                         min_children_per_line=1, max_children_per_line=2,
+                                         column_spacing=18, row_spacing=4, homogeneous=False,
+                                         halign=Gtk.Align.END)
+        footer.append(self.footer_status)
+        definitions = Gtk.Box(spacing=8, halign=Gtk.Align.END)
         self.definition_label = Gtk.Label(xalign=1, wrap=True)
         self.definition_label.set_tooltip_text('端末にある定義ファイルのうち、最後に書き換わった日時です。更新の確認だけを行った時刻とは異なります。')
+        self.definition_label.add_css_class('caption')
         definitions.append(self.definition_label)
-        self.definition_button = Gtk.Button(label='自動更新：確認中…', tooltip_text='定義ファイルの自動更新を設定')
+        self.definition_button = Gtk.Button(icon_name='view-refresh-symbolic', tooltip_text='定義ファイルの更新設定を開く')
+        self.definition_button.update_property([Gtk.AccessibleProperty.LABEL], ['定義ファイルの更新設定を開く'])
         self.definition_button.connect('clicked', lambda _: self.package_setup(update_only=True))
         definitions.append(self.definition_button)
-        footer.append(definitions)
+        self.footer_status.append(definitions)
         engine = Gtk.Box(spacing=8, halign=Gtk.Align.END)
-        self.engine_label = Gtk.Label(label='ClamAV本体：確認中…', xalign=1, wrap=True, selectable=True)
+        self.engine_label = Gtk.Label(label='ClamAV：確認中…', xalign=1, wrap=True, selectable=True)
+        self.engine_label.add_css_class('caption')
         engine.append(self.engine_label)
         self.engine_refresh = Gtk.Button(icon_name='view-refresh-symbolic', tooltip_text='ClamAV本体の更新状態を再確認')
         self.engine_refresh.update_property([Gtk.AccessibleProperty.LABEL], ['ClamAV本体の更新状態を再確認'])
         self.engine_refresh.connect('clicked', lambda _: self.refresh_engine_status(force=True))
         engine.append(self.engine_refresh)
-        footer.append(engine)
+        self.footer_status.append(engine)
         self.refreshing_profiles = False
         self.action_key = None
         self.log_entries = []

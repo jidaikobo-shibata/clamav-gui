@@ -6,14 +6,14 @@ import time
 from gi.repository import GLib, Gtk
 from ..definitions import AutoUpdateState
 from ..jobs import start_worker
+from ..footer import compact_engine_label
 
 
 class PackageWindow:
     def show_auto_status(self, status):
         self.auto_generation += 1
         self.auto_status = status
-        self.definition_button.set_label(status.label() + '…')
-        self.definition_button.set_tooltip_text('定義ファイルの更新設定を開きます。\n' + status.frequency() +
+        self.definition_button.set_tooltip_text('定義ファイルの更新設定を開きます。\n' + status.label() + '\n' + status.frequency() +
                                                ('\n' + status.detail if status.detail else ''))
 
     def refresh_auto_status(self, force=False):
@@ -51,8 +51,8 @@ class PackageWindow:
         def deliver(label, detail):
             self.engine_checking = False
             self.engine_checked_at = time.monotonic()
-            self.engine_label.set_text(label)
-            self.engine_label.set_tooltip_text(detail)
+            self.engine_label.set_text(compact_engine_label(label))
+            self.engine_label.set_tooltip_text(label + '\n' + detail)
             self.engine_refresh.set_sensitive(True)
             if self.engine_check_pending:
                 self.engine_check_pending = False

@@ -102,5 +102,5 @@ class EngineUpdateTests(unittest.TestCase):
         with patch('clam_gui.ui.packages.start_worker', side_effect=lambda worker, failed: failed(RuntimeError('cannot start'))):
             PackageWindow.refresh_engine_status(host)
         self.assertFalse(host.engine_checking)
-        host.engine_label.set_text.assert_called_with('ClamAV本体：更新状態を確認できません')
+        host.engine_label.set_text.assert_called_with('ClamAV：確認不可')
         host.engine_refresh.set_sensitive.assert_called_with(True)

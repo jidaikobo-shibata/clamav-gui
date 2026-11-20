@@ -115,7 +115,14 @@ def check():
     app.store.save('2026-11-16T11:00:00+09:00', plan.describe(), '検出あり' + MAILBOX_NOTE, mailbox_guidance([('/example/INBOX', False)]), key)
     app.refresh_profiles(key)
     settle_history()
-    assert '更新なし（APT情報）' in app.engine_label.get_text()
+    assert app.engine_label.get_text() == 'ClamAV test'
+    assert '更新なし（APT情報）' in app.engine_label.get_tooltip_text()
+    assert app.definition_button.get_icon_name() == 'view-refresh-symbolic'
+    assert app.definition_label.has_css_class('caption')
+    assert app.engine_label.has_css_class('caption')
+    wide_height = app.footer_status.measure(Gtk.Orientation.VERTICAL, 1000)[1]
+    narrow_height = app.footer_status.measure(Gtk.Orientation.VERTICAL, 260)[1]
+    assert narrow_height > wide_height, (narrow_height, wide_height)
     assert app.engine_refresh.get_sensitive()
     assert len(app.log_entries) == 2
     assert app.history_list.get_row_at_index(0).get_child().get_attributes() is not None
@@ -411,7 +418,7 @@ def check():
                 assert auto_switch.get_sensitive() and not app.busy
             wait_auto()
             assert auto_switch.get_active()
-            assert '自動更新：有効' in app.definition_button.get_label()
+            assert '自動更新：有効' in app.definition_button.get_tooltip_text()
             auto_switch.set_active(False)
             dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
             dialog.response(Gtk.ResponseType.CANCEL)
@@ -428,7 +435,7 @@ def check():
             dialog.response(Gtk.ResponseType.OK)
             wait_auto()
             assert not auto_switch.get_active()
-            assert '自動更新：無効' in app.definition_button.get_label()
+            assert '自動更新：無効' in app.definition_button.get_tooltip_text()
             auto_service.return_value.set_enabled.side_effect = RuntimeError('mock authorization rejected')
             auto_switch.set_active(True)
             dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
