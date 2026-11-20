@@ -1,5 +1,6 @@
 """Drain scanner output continuously into bounded memory, never a growing file."""
 import os
+import ntpath
 import threading
 from .results import warning_signature
 
@@ -13,6 +14,7 @@ class ScanOutput:
     def __init__(self):
         self.tail = bytearray()
         self.pending = bytearray()
+        self.skip_counts = {'Empty file': 0, 'Symbolic link': 0}
         self.evidence = []
         self.threats = []
         self.threat_bytes = self.threat_count = self.retained_threats = 0
@@ -74,11 +76,31 @@ class ScanOutput:
             else:
                 self.omitted = True
 
-    def _feed(self, chunk):
-        self.total += len(chunk)
-        self.tail.extend(chunk)
+    def _append_tail(self, data):
+        self.tail.extend(data)
         if len(self.tail) > self.TAIL:
             del self.tail[:-self.TAIL]
+
+    def _accept_line(self, line):
+        # Only recognize complete, bounded ClamAV path/verdict records. Keep
+        # unknown formats and long-line fragments as diagnostic output.
+        if not self.skipped and len(line) <= self.LINE:
+            path, separator, verdict = line.rstrip(b'\r\n').rpartition(b': ')
+            if separator and (os.path.isabs(path) or ntpath.isabs(path)):
+                if verdict in (b'Empty file', b'Symbolic link'):
+                    self.skip_counts[verdict.decode('ascii')] += 1
+                    return b''
+        # All offsets refer to the filtered stream, shared by tail and evidence.
+        self.total += len(line)
+        self.line_end = self.total
+        self._line(line[-self.LINE:], self.line_end)
+        if self.skipped or len(line) > self.LINE:
+            self.omitted = True
+        self.skipped = 0
+        return line
+
+    def _feed(self, chunk):
+        retained = []
         self.pending.extend(chunk)
         while True:
             newline = self.pending.find(b'\n')
@@ -86,16 +108,16 @@ class ScanOutput:
                 break
             line = bytes(self.pending[:newline+1])
             del self.pending[:newline+1]
-            self.line_end += self.skipped + len(line)
-            self.skipped = 0
-            self._line(line[-self.LINE:], self.line_end)
-            if len(line) > self.LINE:
-                self.omitted = True
+            retained.append(self._accept_line(line))
         if len(self.pending) > self.LINE:
             extra = len(self.pending) - self.LINE
+            retained.append(bytes(self.pending[:extra]))
+            self.total += extra
             self.skipped += extra
             del self.pending[:extra]
             self.omitted = True
+        # Batch the tail update: shifting a 1MiB buffer per path is expensive.
+        self._append_tail(b''.join(retained))
 
     def _drain(self):
         try:
@@ -105,7 +127,7 @@ class ScanOutput:
                     break
                 self._feed(chunk)
             if self.pending:
-                self._line(bytes(self.pending), self.total)
+                self._append_tail(self._accept_line(bytes(self.pending)))
                 self.pending.clear()
         except Exception as error:
             self.error = str(error)
@@ -144,6 +166,12 @@ class ScanOutput:
             text += '\nWARNING: 保持範囲外にも検査上の警告・エラーがありました。\n'
         if self.error:
             text += '\nWARNING: 検査出力の読取りエラー：' + self.error
+        labels = {'Empty file': '空ファイルのため検査省略',
+                  'Symbolic link': 'リンクを追跡しない設定のため検査省略'}
+        summary = [f'{labels[reason]}：{count}件' for reason, count in self.skip_counts.items() if count]
+        if summary:
+            text += '\n\n--- 通常の検査省略（件数） ---\n' + '\n'.join(summary)
+            text += '\n個別のファイル名は件数に集約しています。\n'
         return text
 
     def __exit__(self, *_):
