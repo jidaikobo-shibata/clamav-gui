@@ -51,7 +51,7 @@ class ExclusionWindow(Gtk.Window):
         self.path_entry = Gtk.Entry(hexpand=True, placeholder_text='除外するフォルダーの絶対パス')
         caption.set_mnemonic_widget(self.path_entry)
         self.path_entry.update_property([Gtk.AccessibleProperty.LABEL], ['除外するフォルダーのパス'])
-        self.path_entry.connect('changed', self.search)
+        self.path_search_handler = self.path_entry.connect('changed', self.search)
         self.path_entry.connect('activate', self.add_path)
         self.add_button = Gtk.Button(label='追加する', sensitive=False)
         self.add_button.connect('clicked', self.add_path)
@@ -235,8 +235,14 @@ class ExclusionWindow(Gtk.Window):
         self.draft_exclusions.append(path)
         self.message.set_text(f'このフォルダーと配下すべてを除外する変更案を追加しました。ログ中の{len(affected):,}フォルダー・'
                               f'{sum(len(item.findings) for item in affected):,}件の報告が除外範囲に入ります。まだ保存していません。')
+        self.path_entry.handler_block(self.path_search_handler)
+        try:
+            self.path_entry.set_text('')
+        finally:
+            self.path_entry.handler_unblock(self.path_search_handler)
         self.page = 0
         self.render()
+        self.path_entry.grab_focus()
 
     def remove_path(self, path):
         self.draft_exclusions.remove(path)

@@ -324,6 +324,7 @@ def check():
     folders.path_entry.set_text(str(threat_folder))
     folders.add_button.emit('clicked')
     assert '脅威' in folders.message.get_text()
+    assert folders.path_entry.get_text() == str(threat_folder)
     folders.path_entry.set_text('')
     assert folders.search_count.get_text() == 'ヒット：3件'
     path_copy = folders.candidate_buttons[str(db_folder)].get_next_sibling()
@@ -348,11 +349,14 @@ def check():
         assert '開けませんでした' in folders.message.get_text()
     folders.path_entry.set_text(str(db_folder))
     folders.add_button.emit('clicked')
+    assert folders.path_entry.get_text() == ''
+    assert folders.search_count.get_text() == 'ヒット：2件'
     assert str(db_folder) not in folders.candidate_buttons
     assert '1フォルダー・2件' in folders.message.get_text()
     assert dict(app.store.profiles())[exclusion_key].excluded_dirs == [str(existing_folder)]
     folders.remove_buttons[str(db_folder)].emit('clicked')
     assert str(db_folder) in folders.candidate_buttons
+    folders.path_entry.set_text(str(db_folder))
     folders.add_button.emit('clicked')
     folders.path_entry.set_text(str(denied_folder))
     folders.add_button.emit('clicked')
