@@ -75,8 +75,8 @@ def _error_group(reason):
     return 'error'
 
 
-def build_report(entry):
-    """Counts describe retained lines unless explicitly labelled as ClamAV totals."""
+def build_report(entry, *, preview_limit=PREVIEW_LIMIT):
+    """Count retained lines; preview_limit=None includes all retained details for copying."""
     counts=Counter();examples={key:[] for key in GROUPS};detections=[];detected_count=0
     skips=Counter();error_lines=0;missing_details=[]
     app_errors={'ClamAVの実行エラー：':'execution','履歴保存エラー：':'storage'}
@@ -84,7 +84,7 @@ def build_report(entry):
         app_key=next((key for prefix,key in app_errors.items() if line.startswith(prefix)),None)
         if app_key:
             counts[app_key]+=1
-            if len(examples[app_key])<PREVIEW_LIMIT:
+            if preview_limit is None or len(examples[app_key])<preview_limit:
                 examples[app_key].append(Finding('',line.partition('：')[2].strip()))
             continue
         if line.endswith(' FOUND'):
@@ -92,7 +92,7 @@ def build_report(entry):
             finding=Finding(path,signature)
             if not warning_signature(line):
                 detected_count+=1
-                if len(detections)<PREVIEW_LIMIT:detections.append(finding)
+                if preview_limit is None or len(detections)<preview_limit:detections.append(finding)
                 continue
             key=_warning_group(signature)
         else:
@@ -104,7 +104,7 @@ def build_report(entry):
                 error_lines+=1;key='engine'
                 finding=Finding('',line.partition(':')[2].strip())
                 counts[key]+=1
-                if len(examples[key])<PREVIEW_LIMIT:examples[key].append(finding)
+                if preview_limit is None or len(examples[key])<preview_limit:examples[key].append(finding)
                 continue
             plain_path_error=(separator and reason in ('Access denied','Permission denied',"Can't open directory.")
                               and (path.startswith(('/', '\\')) or re.match(r'^[A-Za-z]:[\\/]',path)))
@@ -120,7 +120,7 @@ def build_report(entry):
             else:continue
             finding=Finding(path if separator and not line.startswith(('ERROR:', 'WARNING:', 'LibClamAV Warning:')) else '',reason if separator else line)
         counts[key]+=1
-        if len(examples[key])<PREVIEW_LIMIT:examples[key].append(finding)
+        if preview_limit is None or len(examples[key])<preview_limit:examples[key].append(finding)
 
     def number(name):
         values=re.findall(r'^'+re.escape(name)+r':\s*(\d+)\s*$',entry.output,re.M)

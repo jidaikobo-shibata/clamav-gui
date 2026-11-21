@@ -1,4 +1,4 @@
-"""One selectable result document, with character ranges for presentation tags."""
+"""Plain-text serialization of scan results and retained category details."""
 
 
 def report_text(report):
@@ -34,3 +34,13 @@ def report_text(report):
         add('通常の検査省略（件数）', 'heading')
         add('\n'.join(f'{name}：{value}' for name, value in report.skips))
     return ''.join(chunks), tuple(ranges)
+
+
+def group_text(group):
+    """Copy a complete retained category, or render a bounded preview."""
+    chunks = [f'{group.title}：{group.count:,}件', group.action]
+    for finding in group.examples:
+        chunks.append((finding.path + '\n' if finding.path else '') + finding.detail)
+    if group.count > len(group.examples):
+        chunks.append(f'先頭{len(group.examples):,}件を表示しています。残りは保持した詳細ログで確認してください。')
+    return '\n\n'.join(chunks)

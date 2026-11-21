@@ -35,3 +35,29 @@ class ReportTextTests(unittest.TestCase):
         text, _ = self.render('Scanned files: 1\n-- この検査で使用した設定 ---\nPDF: 有効\n')
         self.assertIn('明細はありません', text)
         self.assertNotIn('PDF: 有効', text)
+
+    def test_full_category_copy_includes_records_beyond_preview_limit(self):
+        from clam_gui.report_text import group_text
+        output = ''.join(f'/example/file-{i}: Access denied\n' for i in range(110))
+        entry = HistoryEntry(1, '2026-11-21T02:00:00', '2026-11-21T05:55:00', 0,
+                             '', '検査不完了', output, 'incomplete')
+        preview = build_report(entry)
+        full = build_report(entry, preview_limit=None)
+        self.assertEqual(len(preview.groups[0].examples), 100)
+        self.assertEqual(len(full.groups[0].examples), 110)
+        copied = group_text(full.groups[0])
+        self.assertIn('/example/file-109\nAccess denied', copied)
+        self.assertNotIn('先頭100件', copied)
+        self.assertIn('権限不足：110件', copied)
+        self.assertIn('/example/file-109', report_text(full)[0])
+
+    def test_full_copy_keeps_truncation_notice_and_separates_categories(self):
+        output = ('出力が大きいため末尾のみ保存しています。\n'
+                  '/example/private: Access denied\n'
+                  '/example/folder: Can\'t open directory.\nInfected files: 57\n')
+        entry = HistoryEntry(1, '2026-11-21T02:00:00', '2026-11-21T05:55:00', 0,
+                             '', '検査不完了', output, 'incomplete')
+        full = build_report(entry, preview_limit=None)
+        self.assertIn('全体の内訳ではありません', full.coverage)
+        self.assertEqual([group.count for group in full.groups], [1, 1])
+        self.assertEqual(len(full.groups[0].examples), 1)
