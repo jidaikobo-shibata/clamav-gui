@@ -153,10 +153,10 @@ class ExclusionWindow(Gtk.Window):
             path_button.connect('clicked', lambda _, path=folder.path: self.path_entry.set_text(path))
             self.candidate_buttons[folder.path] = path_button
             row.append(path_button)
-            copy = Gtk.Button(icon_name='edit-copy-symbolic', tooltip_text='このフォルダーの明細をコピー')
+            copy = Gtk.Button(icon_name='edit-copy-symbolic', tooltip_text='フォルダーのパスをコピー')
             copy.add_css_class('flat')
-            copy.update_property([Gtk.AccessibleProperty.LABEL], [folder.path + 'の明細をコピー'])
-            copy.connect('clicked', lambda _, item=folder: self.get_clipboard().set(self.folder_text(item)))
+            copy.update_property([Gtk.AccessibleProperty.LABEL], [folder.path + 'のパスをコピー'])
+            copy.connect('clicked', lambda _, item=folder: self.get_clipboard().set(item.path))
             row.append(copy)
             box.append(row)
             box.append(self.pane.label(' / '.join(f'{name}：{count:,}件' for name, count in folder.reasons), 'dim-label'))
@@ -201,10 +201,6 @@ class ExclusionWindow(Gtk.Window):
     def turn(self, step):
         self.page += step
         self.render()
-    def folder_text(self, folder):
-        return folder.path + '\n\n' + self.full_report.coverage + '\n\n' + '\n\n'.join(
-            finding.path + '\n' + finding.detail for finding in folder.findings)
-
     def fill_details(self, widget, folder):
         if not widget.get_expanded() or widget.get_child():
             return

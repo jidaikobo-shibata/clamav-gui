@@ -298,6 +298,10 @@ def check():
     folders.path_entry.set_text(str(threat_folder))
     folders.add_button.emit('clicked')
     assert '脅威' in folders.message.get_text()
+    path_copy = folders.candidate_buttons[str(db_folder)].get_next_sibling()
+    assert path_copy.get_tooltip_text() == 'フォルダーのパスをコピー'
+    path_copy.emit('clicked')
+    assert clipboard_text(folders) == str(db_folder)
     folders.candidate_buttons[str(db_folder)].emit('clicked')
     assert folders.path_entry.get_text() == str(db_folder)
     folders.add_button.emit('clicked')
