@@ -60,3 +60,18 @@ def exclusion_state(plan, folder, threats=()):
         if excluded == path or excluded in path.parents:
             return 'すでに除外されています。'
     return ''
+
+
+def covered_by(folder, exclusions):
+    path = Path(os.path.normpath(str(folder)))
+    return any(path == Path(os.path.normpath(str(item))) or
+               Path(os.path.normpath(str(item))) in path.parents for item in exclusions)
+
+
+def highlight_path(path, query):
+    """Literal, case-sensitive highlighting; never interpret log text as markup."""
+    from html import escape
+    if not query:
+        return escape(path, quote=False)
+    return ('<b>' + escape(query, quote=False) + '</b>').join(
+        escape(part, quote=False) for part in path.split(query))

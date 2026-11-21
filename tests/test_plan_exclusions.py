@@ -85,3 +85,38 @@ class PlanExclusionTests(unittest.TestCase):
         self.assertTrue(exclusion_state(replace(self.plan, kind='media'), self.a))
         with self.assertRaises(ValueError):
             self.store.add_excluded_folders('external-media', [str(self.a)], expected_target=self.plan.targets)
+
+    def test_literal_highlight_escapes_markup_and_handles_repeated_matches(self):
+        from clam_gui.plan_exclusions import highlight_path
+        self.assertEqual(highlight_path('/a/<b>&/a', 'a'), '/<b>a</b>/&lt;b&gt;&amp;/<b>a</b>')
+        self.assertEqual(highlight_path('/a/<b>', '<b>'), '/a/<b>&lt;b&gt;</b>')
+        self.assertEqual(highlight_path('/a/<b>', ''), '/a/&lt;b&gt;')
+
+    def test_coverage_respects_directory_boundaries(self):
+        from clam_gui.plan_exclusions import covered_by
+        self.assertTrue(covered_by(self.a/'child', [str(self.a)]))
+        self.assertTrue(covered_by(self.a, [str(self.a)]))
+        self.assertFalse(covered_by(str(self.a)+'-backup', [str(self.a)]))
+
+    def test_delta_save_preserves_concurrently_added_exclusions(self):
+        child = self.root/'new'
+        child.mkdir()
+        self.store.save_profile(replace(self.plan, excluded_dirs=[str(self.a), str(self.b)]), self.key)
+        added, removed = self.store.edit_excluded_folders(self.key, [str(child)], [str(self.a)],
+                                                          expected_target=self.plan.targets)
+        self.assertEqual(added, [str(child)])
+        self.assertEqual(removed, [str(self.a)])
+        self.assertEqual(dict(self.store.profiles())[self.key].excluded_dirs, [str(self.b), str(child)])
+
+    def test_invalid_addition_rolls_back_removal_too(self):
+        self.store.save_profile(replace(self.plan, excluded_dirs=[str(self.a)]), self.key)
+        with self.assertRaises(ValueError):
+            self.store.edit_excluded_folders(self.key, [str(self.root)], [str(self.a)],
+                                             expected_target=self.plan.targets)
+        self.assertEqual(dict(self.store.profiles())[self.key].excluded_dirs, [str(self.a)])
+
+    def test_delta_save_rechecks_known_threat_paths(self):
+        with self.assertRaises(ValueError):
+            self.store.edit_excluded_folders(self.key, [str(self.a)], [],
+                                             expected_target=self.plan.targets, threats=[str(self.a/'threat')])
+        self.assertEqual(dict(self.store.profiles())[self.key].excluded_dirs, [])

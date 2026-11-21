@@ -285,8 +285,8 @@ class Store:
                        (key, plan.label.strip(), data))
         return key
 
-    def add_excluded_folders(self, key, folders, *, expected_target):
-        """Merge exclusions into the current plan without restoring a log snapshot."""
+    def edit_excluded_folders(self, key, folders, removals, *, expected_target, threats=()):
+        """Apply only explicit folder additions/removals to the current plan."""
         from .plan_exclusions import exclusion_state
         if key == 'external-media':
             raise ValueError('外部メディア検査はここでは変更できません。')
@@ -299,9 +299,12 @@ class Store:
             plan = Plan(row[0], **data)
             if tuple(plan.targets) != tuple(expected_target):
                 raise ValueError('対象フォルダーが変更されています。候補画面を開き直してください。')
+            remove_set = {os.path.normpath(str(item)) for item in removals}
+            removed = [item for item in plan.excluded_dirs if os.path.normpath(str(item)) in remove_set]
+            plan = replace(plan, excluded_dirs=[item for item in plan.excluded_dirs if item not in removed])
             added = []
             for folder in dict.fromkeys(os.path.normpath(str(item)) for item in folders):
-                state = exclusion_state(plan, folder)
+                state = exclusion_state(plan, folder, threats)
                 if state == 'すでに除外されています。':
                     continue
                 if state:
@@ -314,6 +317,10 @@ class Store:
                 safe_watch_plan(plan, self.path.parent)
             data['excluded_dirs'] = plan.excluded_dirs
             db.execute('UPDATE profiles SET data=? WHERE id=?', (json.dumps(data), key))
+        return added, removed
+
+    def add_excluded_folders(self, key, folders, *, expected_target):
+        added, _ = self.edit_excluded_folders(key, folders, [], expected_target=expected_target)
         return added
 
     def duplicate_profile(self, key):

@@ -281,33 +281,54 @@ def check():
     folders = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'フォルダー別の検査結果')
     settle_history(folders)
     assert '現在のプラン名' in folders.info.get_text()
+    assert '3 / 4' in folders.counter.get_text()
+    assert str(existing_folder) not in folders.candidate_buttons
+    assert str(existing_folder) in folders.remove_buttons
     assert folders.next.get_sensitive()
     folders.next.emit('clicked')
-    assert not folders.checks[str(existing_folder)].get_sensitive()
-    assert not folders.checks[str(threat_folder)].get_sensitive()
+    assert str(threat_folder) in folders.candidate_buttons
     folders.back.emit('clicked')
-    assert folders.checks[str(db_folder)].get_sensitive()
-    assert next(item for item in folders.folders if item.path == str(db_folder)).reasons == (('権限不足', 2),)
-    folders.checks[str(db_folder)].set_active(True)
-    folders.checks[str(denied_folder)].set_active(True)
-    folders.next.emit('clicked')
-    folders.back.emit('clicked')
-    assert folders.checks[str(db_folder)].get_active() and folders.checks[str(denied_folder)].get_active()
+    folders.path_entry.set_text('data')
+    assert any('<b>data</b>' in label.get_label() for path, label in folders.path_labels if path == str(db_folder))
+    folders.add_button.emit('clicked')
+    assert folders.draft_exclusions == [str(existing_folder)]
+    folders.path_entry.set_text(str(fixture))
+    folders.add_button.emit('clicked')
+    assert folders.draft_exclusions == [str(existing_folder)]
+    folders.path_entry.set_text(str(threat_folder))
+    folders.add_button.emit('clicked')
+    assert '脅威' in folders.message.get_text()
+    folders.candidate_buttons[str(db_folder)].emit('clicked')
+    assert folders.path_entry.get_text() == str(db_folder)
+    folders.add_button.emit('clicked')
+    assert str(db_folder) not in folders.candidate_buttons
+    assert '1フォルダー・2件' in folders.message.get_text()
     assert dict(app.store.profiles())[exclusion_key].excluded_dirs == [str(existing_folder)]
-    # Another editor changes a different setting while candidates are open.
-    exclusion_current = replace(exclusion_current, excludes=[str(fixture/'later.txt')], phishing=False)
+    folders.remove_buttons[str(db_folder)].emit('clicked')
+    assert str(db_folder) in folders.candidate_buttons
+    folders.add_button.emit('clicked')
+    folders.path_entry.set_text(str(denied_folder))
+    folders.add_button.emit('clicked')
+    folders.remove_buttons[str(existing_folder)].emit('clicked')
+    assert str(existing_folder) in folders.candidate_buttons
+    assert '2 / 4' in folders.counter.get_text()
+    # Other edits made while this draft is open must survive save.
+    concurrent_folder = fixture/'concurrent'
+    concurrent_folder.mkdir()
+    exclusion_current = replace(exclusion_current, excludes=[str(fixture/'later.txt')], phishing=False,
+                                excluded_dirs=[str(existing_folder), str(concurrent_folder)])
     app.store.save_profile(exclusion_current, exclusion_key)
     folders.review.emit('clicked')
-    confirmation = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '除外するフォルダーの確認')
+    confirmation = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '除外設定の変更を確認')
     labels = [w.get_text() for w in descendants(confirmation) if isinstance(w, Gtk.Label)]
     assert any('配下すべて' in label for label in labels)
-    assert any(str(db_folder) in label for label in labels)
+    assert any(str(db_folder) in label and str(existing_folder) in label for label in labels)
     next(w for w in descendants(confirmation) if isinstance(w, Gtk.Button) and w.get_label() == 'キャンセル').emit('clicked')
     assert dict(app.store.profiles())[exclusion_key] == exclusion_current
     folders.review.emit('clicked')
-    confirmation = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '除外するフォルダーの確認')
-    save_exclusions = next(w for w in descendants(confirmation) if isinstance(w, Gtk.Button) and w.get_label() == '除外を追加して保存')
-    with patch.object(app.store, 'add_excluded_folders', side_effect=OSError('synthetic storage failure')):
+    confirmation = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '除外設定の変更を確認')
+    save_exclusions = next(w for w in descendants(confirmation) if isinstance(w, Gtk.Button) and w.get_label() == '保存')
+    with patch.object(app.store, 'edit_excluded_folders', side_effect=OSError('synthetic storage failure')):
         save_exclusions.emit('clicked')
         assert confirmation.error_label.get_visible()
         assert 'synthetic storage failure' in confirmation.error_label.get_text()
@@ -317,10 +338,20 @@ def check():
     settle_history()
     merged = dict(app.store.profiles())[exclusion_key]
     assert merged.excludes == exclusion_current.excludes and not merged.phishing
-    assert set(merged.excluded_dirs) == {str(existing_folder), str(db_folder), str(denied_folder)}
-    assert not folders.checks[str(db_folder)].get_sensitive()
+    assert set(merged.excluded_dirs) == {str(concurrent_folder), str(db_folder), str(denied_folder)}
+    assert str(db_folder) not in folders.candidate_buttons
+    assert str(existing_folder) in folders.candidate_buttons
+    assert not folders.review.get_sensitive()
     assert '次回' in folders.message.get_text()
+    assert not any(isinstance(w, Gtk.CheckButton) for w in descendants(folders))
     folders.destroy()
+    app.result.folder_button.emit('clicked')
+    cancelled_draft = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'フォルダー別の検査結果')
+    settle_history(cancelled_draft)
+    cancelled_draft.remove_buttons[str(db_folder)].emit('clicked')
+    assert cancelled_draft.review.get_sensitive()
+    next(w for w in descendants(cancelled_draft) if isinstance(w, Gtk.Button) and w.get_label() == 'キャンセル').emit('clicked')
+    assert dict(app.store.profiles())[exclusion_key] == merged
     exclusion_ui.PAGE_SIZE = 50
     app.store.delete_profile(exclusion_key)
     with app.store.connect() as db:
