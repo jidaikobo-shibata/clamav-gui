@@ -46,6 +46,17 @@ class ExclusionWindow(Gtk.Window):
         self.panes.set_end_child(self.right_pane)
         self.panes.set_position(680)
         box.append(self.panes)
+        reason_row = Gtk.Box(spacing=8)
+        reason_caption = Gtk.Label(label='理由')
+        self.reason_names = ['すべて']
+        self.reason_filter = Gtk.DropDown.new_from_strings(self.reason_names)
+        self.reason_filter.set_sensitive(False)
+        reason_caption.set_mnemonic_widget(self.reason_filter)
+        self.reason_filter.update_property([Gtk.AccessibleProperty.LABEL], ['候補を絞り込む理由'])
+        self.reason_handler = self.reason_filter.connect('notify::selected', self.search)
+        reason_row.append(reason_caption)
+        reason_row.append(self.reason_filter)
+        self.left_pane.append(reason_row)
         row = Gtk.Box(spacing=8)
         caption = Gtk.Label(label='パス')
         self.path_entry = Gtk.Entry(hexpand=True, placeholder_text='除外するフォルダーの絶対パス')
@@ -110,6 +121,16 @@ class ExclusionWindow(Gtk.Window):
             self.info.set_text('読み込めませんでした：' + str(error))
             return
         self.full_report, self.folders, self.plan, self.threats = result
+        selected_index = self.reason_filter.get_selected()
+        previous = self.reason_names[selected_index] if selected_index < len(self.reason_names) else 'すべて'
+        self.reason_names = ['すべて'] + list(dict.fromkeys(name for item in self.folders for name, _ in item.reasons))
+        self.reason_filter.handler_block(self.reason_handler)
+        try:
+            self.reason_filter.set_model(Gtk.StringList.new(self.reason_names))
+            self.reason_filter.set_selected(self.reason_names.index(previous) if previous in self.reason_names else 0)
+        finally:
+            self.reason_filter.handler_unblock(self.reason_handler)
+        self.reason_filter.set_sensitive(len(self.reason_names) > 1)
         self.expected_target = tuple(self.plan.targets) if self.plan else ()
         self.initial_exclusions = list(self.plan.excluded_dirs) if self.plan else []
         self.draft_exclusions = list(self.initial_exclusions)
@@ -171,7 +192,10 @@ class ExclusionWindow(Gtk.Window):
         remaining = [item for item in self.folders if not covered_by(item.path, self.draft_exclusions)]
         self.counter.set_text(f'ログ中のフォルダー：除外後に残る {len(remaining):,} / {len(self.folders):,}件')
         query = self.path_entry.get_text()
-        matches = [item for item in remaining if query in item.path]
+        reason_index = self.reason_filter.get_selected()
+        reason = self.reason_names[reason_index] if 0 < reason_index < len(self.reason_names) else None
+        matches = [item for item in remaining if query in item.path and
+                   (reason is None or any(name == reason for name, _ in item.reasons))]
         self.search_count.set_text(f'ヒット：{len(matches):,}件')
         self.page = min(self.page, max(0, (len(matches)-1)//PAGE_SIZE))
         start = self.page * PAGE_SIZE

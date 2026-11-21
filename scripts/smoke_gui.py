@@ -185,6 +185,10 @@ def check():
     assert caution_label.get_attributes() is not None
     assert '要確認・内訳不明' in caution_label.get_text()
     assert app.result.report.title == '要確認・内訳不明'
+    assert app.result.folder_button.get_label() == '除外設定を編集…'
+    assert app.result.folder_button.has_css_class('suggested-action')
+    assert app.result.summary_copy.get_parent() == app.result.folder_button.get_parent()
+    assert app.result.summary_copy.get_next_sibling() == app.result.folder_button
     assert not app.result.raw_loaded
     assert not app.result.raw_expander.get_expanded()
     reasons = app.result.reason_expanders
@@ -266,6 +270,7 @@ def check():
     exclusion_key = app.store.save_profile(exclusion_plan)
     exclusion_output = str(db_folder/'a') + ': Access denied' + chr(10)
     exclusion_output += str(db_folder/'b') + ': Access denied' + chr(10)
+    exclusion_output += str(db_folder/'a') + ': Heuristics.Limits.Exceeded.MaxFileSize FOUND' + chr(10)
     exclusion_output += str(denied_folder) + ": Can't open directory." + chr(10)
     exclusion_output += str(existing_folder/'a') + ': Access denied' + chr(10)
     exclusion_output += str(threat_folder/'test') + ': Test FOUND' + chr(10)
@@ -292,6 +297,20 @@ def check():
 
     assert not folders.counter.get_visible()
     assert folders.search_count.get_text() == 'ヒット：3件'
+    assert set(folders.reason_names) == {'すべて', '権限不足', 'ディレクトリを開けない', 'サイズ上限', '脅威として報告された対象'}
+    folders.reason_filter.set_selected(folders.reason_names.index('権限不足'))
+    assert folders.search_count.get_text() == 'ヒット：1件'
+    assert list(folders.candidate_buttons) == [str(db_folder)]
+    assert 'サイズ上限：1件' in folders.detail_expanders[str(db_folder)].get_label()
+    folders.path_entry.set_text('threat')
+    assert folders.search_count.get_text() == 'ヒット：0件'
+    folders.path_entry.set_text('')
+    folders.reason_filter.set_selected(folders.reason_names.index('サイズ上限'))
+    assert list(folders.candidate_buttons) == [str(db_folder)]
+    folders.reason_filter.set_selected(folders.reason_names.index('ディレクトリを開けない'))
+    assert list(folders.candidate_buttons) == [str(denied_folder)]
+    folders.reason_filter.set_selected(0)
+    assert folders.search_count.get_text() == 'ヒット：3件'
     assert str(existing_folder) not in folders.candidate_buttons
     assert str(existing_folder) in folders.remove_buttons
     assert folders.next.get_sensitive()
@@ -308,7 +327,7 @@ def check():
     settle_history(type('ReaderController', (), {'reader': folders.count_reader})())
     assert folders.count_labels[str(db_folder)].get_text() == '直下：ファイル0件・フォルダー0件'
     detail = folders.detail_expanders[str(db_folder)]
-    assert detail.get_label() == '権限不足：2件'
+    assert '権限不足：2件' in detail.get_label() and 'サイズ上限：1件' in detail.get_label()
     detail.set_expanded(True)
     assert detail.get_child() is not None
     folders.path_entry.set_text('not-found-literal')
@@ -352,7 +371,7 @@ def check():
     assert folders.path_entry.get_text() == ''
     assert folders.search_count.get_text() == 'ヒット：2件'
     assert str(db_folder) not in folders.candidate_buttons
-    assert '1フォルダー・2件' in folders.message.get_text()
+    assert '1フォルダー・3件' in folders.message.get_text()
     assert dict(app.store.profiles())[exclusion_key].excluded_dirs == [str(existing_folder)]
     folders.remove_buttons[str(db_folder)].emit('clicked')
     assert str(db_folder) in folders.candidate_buttons
