@@ -281,6 +281,15 @@ def check():
     folders = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'フォルダー別の検査結果')
     settle_history(folders)
     assert '現在のプラン名' in folders.info.get_text()
+    assert folders.panes.get_orientation() == Gtk.Orientation.HORIZONTAL
+    assert folders.panes.get_start_child() == folders.left_pane
+    assert folders.panes.get_end_child() == folders.right_pane
+    assert folders.path_entry.is_ancestor(folders.left_pane)
+    assert folders.candidate_scroll.get_parent() == folders.left_pane
+    assert folders.excluded_scroll.get_parent() == folders.right_pane
+    assert folders.excluded_scroll.get_max_content_height() == -1
+    assert folders.excluded_scroll.get_vexpand() and folders.candidate_scroll.get_vexpand()
+
     assert '3 / 4' in folders.counter.get_text()
     assert str(existing_folder) not in folders.candidate_buttons
     assert str(existing_folder) in folders.remove_buttons
