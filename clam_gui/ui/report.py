@@ -1,5 +1,6 @@
 """Progressive disclosure for scan results; large raw buffers are loaded on demand."""
 from gi.repository import Gtk, Pango
+from ..report_text import report_text
 
 
 class ReportPane(Gtk.Box):
@@ -30,6 +31,8 @@ class ReportPane(Gtk.Box):
     def show_message(self, message):
         self.clear()
         self.entry = self.report = None
+        self.summary = None
+        self.summary_copy = None
         self.message = message
         self.append(self.label(message))
 
@@ -54,44 +57,27 @@ class ReportPane(Gtk.Box):
         expander.set_expanded(expanded)
         return expander
 
-    def group(self, group, expanded=False):
-        def fill():
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                          margin_start=12, margin_top=8, margin_bottom=8)
-            box.append(self.label(group.action))
-            for finding in group.examples:
-                item = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-                if finding.path:
-                    item.append(self.label(finding.path))
-                item.append(self.label(finding.detail, 'dim-label'))
-                box.append(item)
-            if group.count > len(group.examples):
-                box.append(self.label(f'先頭{len(group.examples):,}件を表示しています。残りは保持した詳細ログで確認してください。'))
-            return box
-        return self.details(f'{group.title}：{group.count:,}件', fill, expanded)
-
     def show_entry(self, entry, report):
         self.clear()
         self.entry, self.report = entry, report
-        self.append(self.label(report.title, 'title-2'))
-        self.append(self.label(report.description))
-        self.append(self.label('次の対応', 'heading'))
-        self.append(self.label(report.action))
-        grid = Gtk.Grid(column_spacing=18, row_spacing=8)
-        for row, (name, value) in enumerate(report.metrics):
-            grid.attach(self.label(name, 'dim-label'), 0, row, 1, 1)
-            grid.attach(self.label(value), 1, row, 1, 1)
-        self.append(grid)
-        for caution in report.cautions:
-            self.append(self.label(caution))
-        self.append(self.label('検出内容・確認が必要な理由', 'heading'))
-        self.append(self.label(report.coverage, 'dim-label'))
-        self.finding_expanders = [self.group(group, True) for group in report.detections]
-        self.reason_expanders = [self.group(group) for group in report.groups]
-        if not report.groups and not report.detections:
-            self.append(self.label('保持したログに検出・警告・エラーの明細はありません。'))
-        if report.skips:
-            self.details('通常の検査省略（件数）', lambda: self.label('\n'.join(f'{name}：{value}' for name, value in report.skips)))
+        self.summary_copy = Gtk.Button(label='表示内容をコピー', halign=Gtk.Align.END)
+        self.summary_copy.connect('clicked', self.copy_summary)
+        self.append(self.summary_copy)
+        self.summary = Gtk.TextView(editable=False, cursor_visible=True, accepts_tab=False,
+                                    wrap_mode=Gtk.WrapMode.WORD_CHAR,
+                                    pixels_above_lines=2, pixels_below_lines=2)
+        self.summary.update_property([Gtk.AccessibleProperty.LABEL], ['検査結果と理由別の明細'])
+        buffer = self.summary.get_buffer()
+        text, ranges = report_text(report)
+        buffer.set_text(text)
+        buffer.create_tag('title', weight=Pango.Weight.BOLD, scale=1.25)
+        buffer.create_tag('heading', weight=Pango.Weight.BOLD)
+        for style, start, end in ranges:
+            buffer.apply_tag_by_name(style, buffer.get_iter_at_offset(start), buffer.get_iter_at_offset(end))
+        buffer.place_cursor(buffer.get_start_iter())
+        self.summary_scroll = Gtk.ScrolledWindow(min_content_height=360, vexpand=True, hexpand=True)
+        self.summary_scroll.set_child(self.summary)
+        self.append(self.summary_scroll)
         self.details('この検査で使用した条件', lambda: self.label(report.conditions or '条件の記録はありません。'))
         def raw_details():
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -111,3 +97,8 @@ class ReportPane(Gtk.Box):
             box.append(scroll)
             return box
         self.raw_expander = self.details('保持した詳細ログ', raw_details)
+
+    def copy_summary(self, _button):
+        if self.summary is not None:
+            buffer = self.summary.get_buffer()
+            self.get_clipboard().set(buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True))

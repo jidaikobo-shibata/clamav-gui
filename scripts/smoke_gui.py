@@ -172,15 +172,29 @@ def check():
     assert app.result.report.title == '要確認・内訳不明'
     assert not app.result.raw_loaded
     assert not app.result.raw_expander.get_expanded()
-    reasons = app.result.reason_expanders
-    assert len(reasons) == 3 and reasons[0].get_child() is None
-    assert reasons[1].get_label() == '権限不足：1件'
-    assert reasons[2].get_label() == 'ディレクトリを開けない：1件'
-    for reason in reasons[1:]:
-        reason.set_expanded(True)
-        assert reason.get_child() is not None
-    reasons[0].set_expanded(True)
-    assert reasons[0].get_child() is not None
+    summary = app.result.summary
+    assert isinstance(summary, Gtk.TextView) and not summary.get_editable()
+    assert summary.get_cursor_visible() and not summary.get_accepts_tab()
+    assert app.result.summary_scroll.get_child() == summary
+    assert app.result.summary_scroll.get_min_content_height() >= 300
+    assert app.result.summary_scroll.measure(Gtk.Orientation.VERTICAL, 500)[0] >= 300
+    summary_buffer = summary.get_buffer()
+    summary_text = summary_buffer.get_text(summary_buffer.get_start_iter(), summary_buffer.get_end_iter(), True)
+    assert '権限不足：1件' in summary_text
+    assert 'ディレクトリを開けない：1件' in summary_text
+    assert '/synthetic/private' in summary_text and '/synthetic/directory' in summary_text
+    assert summary.activate_action('selection.select-all', None)
+    bounds = summary_buffer.get_selection_bounds()
+    assert bounds and summary_buffer.get_text(*bounds, True) == summary_text
+    assert summary.activate_action('clipboard.copy', None)
+    app.result.summary_copy.emit('clicked')
+    # Select across file paths, reasons and section boundaries in one buffer.
+    start = summary_text.index('/synthetic/private')
+    end = summary_text.index('/synthetic/directory') + len('/synthetic/directory')
+    summary_buffer.select_range(summary_buffer.get_iter_at_offset(start), summary_buffer.get_iter_at_offset(end))
+    selected = summary_buffer.get_text(*summary_buffer.get_selection_bounds(), True)
+    assert 'Access denied' in selected and 'ディレクトリを開けない' in selected
+    assert not app.result.raw_loaded
     app.result.raw_expander.set_expanded(True)
     assert app.result.raw_loaded
     copy_button = app.result.raw_expander.get_child().get_first_child()
