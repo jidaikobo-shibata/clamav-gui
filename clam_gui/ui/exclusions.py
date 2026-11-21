@@ -7,7 +7,7 @@ from gi.repository import Gio, GLib, Gtk, Pango
 from ..async_reader import LatestReader
 from ..plan_exclusions import exclusion_state, folder_reports, covered_by, highlight_path
 from ..report import build_report
-from ..folder_info import count_children, local_folder_path
+from ..folder_info import count_children, local_folder_path, total_children_label
 
 PAGE_SIZE = 50
 
@@ -32,6 +32,7 @@ class ExclusionWindow(Gtk.Window):
         self.count_cancel = threading.Event()
         self.open_cancel = Gio.Cancellable()
         self.count_cache = {}
+        self.count_generation = 0
         self.opening = False
         self.connect('unrealize', self.closed)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
@@ -75,7 +76,13 @@ class ExclusionWindow(Gtk.Window):
         self.counter = pane.label('')
         self.counter.set_visible(False)
         self.search_count = pane.label('ヒット：0件')
-        self.left_pane.append(self.search_count)
+        count_row = Gtk.Box(spacing=16)
+        count_row.append(self.search_count)
+        self.impact_count = pane.label('除外される直下：確認中…')
+        self.impact_count.set_hexpand(True)
+        self.impact_count.set_tooltip_text('現在の検索にヒットした全フォルダーの直下件数の合計です。配下全体や除外範囲の確定値ではありません。最大1分前の取得結果を含み、確認できない分や集計上限は区別します。')
+        count_row.append(self.impact_count)
+        self.left_pane.append(count_row)
         self.message = pane.label('')
         self.right_pane.append(pane.label('現在の除外設定（フォルダー・保存前の変更案）', 'heading'))
         self.excluded_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -196,6 +203,7 @@ class ExclusionWindow(Gtk.Window):
         reason = self.reason_names[reason_index] if 0 < reason_index < len(self.reason_names) else None
         matches = [item for item in remaining if query in item.path and
                    (reason is None or any(name == reason for name, _ in item.reasons))]
+        self.matched_paths = tuple(item.path for item in matches)
         self.search_count.set_text(f'ヒット：{len(matches):,}件')
         self.page = min(self.page, max(0, (len(matches)-1)//PAGE_SIZE))
         start = self.page * PAGE_SIZE
@@ -365,34 +373,47 @@ class ExclusionWindow(Gtk.Window):
     def refresh_counts(self):
         self.count_cancel.set()
         cancel = self.count_cancel = threading.Event()
+        self.count_generation += 1
+        generation = self.count_generation
         labels = dict(self.count_labels)
+        paths = self.matched_paths
         now = time.monotonic()
-        missing = []
-        for path, label in labels.items():
+        values = {}
+        for path in paths:
             cached = self.count_cache.get(path)
             if cached and now-cached[0] < 60:
-                label.set_text(cached[1].label())
-            else:
-                missing.append(path)
+                values[path] = cached
+                if path in labels:
+                    labels[path].set_text(cached[1].label())
+        # Inspect the visible page first, then other matching folders.
+        missing = list(dict.fromkeys([path for path in labels if path not in values] +
+                                    [path for path in paths if path not in values]))
+        self.impact_count.set_text(total_children_label((values[path][1] if path in values else None for path in paths),
+                                                       checking=bool(missing)))
         if not missing:
             return
         def load():
-            values = {}
+            collected = {}
+            started = time.monotonic()
             for path in missing:
-                if cancel.is_set():
+                if cancel.is_set() or time.monotonic()-started >= 2:
                     break
                 value = count_children(path, cancel=cancel)
                 if value is not None:
-                    values[path] = (time.monotonic(), value)
-            return values
-        def done(values, error):
-            if error:
-                for path in missing:
-                    labels[path].set_text('直下：確認できません')
+                    collected[path] = (time.monotonic(), value)
+            return collected
+        def done(collected, error):
+            if generation != self.count_generation:
                 return
-            for path, value in values.items():
-                self.count_cache[path] = value
-                labels[path].set_text(value[1].label())
+            if collected:
+                self.count_cache.update(collected)
+                values.update(collected)
+            for path in labels:
+                if path in values:
+                    labels[path].set_text(values[path][1].label())
+                else:
+                    labels[path].set_text('直下：未確認（集計上限または取得失敗）')
+            self.impact_count.set_text(total_children_label(values[path][1] if path in values else None for path in paths))
         try:
             self.count_reader.submit(load, done)
         except Exception as error:

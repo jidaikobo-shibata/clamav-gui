@@ -69,3 +69,14 @@ class FolderInfoTests(unittest.TestCase):
         for value in ('relative', 'https://example.com', str(self.root/'file'), str(self.root/'missing')):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 local_folder_path(value)
+
+    def test_total_counts_distinguish_complete_partial_and_pending(self):
+        from clam_gui.folder_info import FolderCounts, total_children_label
+        complete = total_children_label([FolderCounts(files=3, directories=2), FolderCounts(files=4, links=1)])
+        self.assertIn('ファイル7件・フォルダー2件・リンク1件', complete)
+        self.assertNotIn('未確認', complete)
+        partial = total_children_label([FolderCounts(files=3, complete=False, reason='limit'), None])
+        self.assertIn('ファイル3件', partial)
+        self.assertIn('未確認・一部集計：2フォルダー', partial)
+        self.assertIn('確認中：1フォルダー', total_children_label([None], checking=True))
+        self.assertEqual(total_children_label([]), '除外される直下：ファイル0件・フォルダー0件')

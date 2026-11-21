@@ -266,6 +266,10 @@ def check():
     db_folder, denied_folder, existing_folder, threat_folder = [fixture/name for name in ('database', 'blocked', 'existing', 'threat')]
     for directory in (db_folder, denied_folder, existing_folder, threat_folder):
         directory.mkdir()
+    (denied_folder/'normal').touch()
+    (threat_folder/'one').touch()
+    (threat_folder/'two').touch()
+    (existing_folder/'excluded').touch()
     exclusion_plan = Plan('古いプラン名', [str(fixture)], [])
     exclusion_key = app.store.save_profile(exclusion_plan)
     exclusion_output = str(db_folder/'a') + ': Access denied' + chr(10)
@@ -297,6 +301,9 @@ def check():
 
     assert not folders.counter.get_visible()
     assert folders.search_count.get_text() == 'ヒット：3件'
+    settle_history(type('ReaderController', (), {'reader': folders.count_reader})())
+    assert folders.impact_count.get_text() == '除外される直下：ファイル3件・フォルダー0件'
+    assert folders.search_count.get_parent() == folders.impact_count.get_parent()
     assert set(folders.reason_names) == {'すべて', '権限不足', 'ディレクトリを開けない', 'サイズ上限', '脅威として報告された対象'}
     folders.reason_filter.set_selected(folders.reason_names.index('権限不足'))
     assert folders.search_count.get_text() == 'ヒット：1件'
@@ -309,6 +316,8 @@ def check():
     assert list(folders.candidate_buttons) == [str(db_folder)]
     folders.reason_filter.set_selected(folders.reason_names.index('ディレクトリを開けない'))
     assert list(folders.candidate_buttons) == [str(denied_folder)]
+    settle_history(type('ReaderController', (), {'reader': folders.count_reader})())
+    assert folders.impact_count.get_text() == '除外される直下：ファイル1件・フォルダー0件'
     folders.reason_filter.set_selected(0)
     assert folders.search_count.get_text() == 'ヒット：3件'
     assert str(existing_folder) not in folders.candidate_buttons

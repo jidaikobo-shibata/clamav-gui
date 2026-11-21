@@ -68,3 +68,22 @@ def local_folder_path(text):
     if not path.is_absolute() or not path.is_dir():
         raise ValueError('存在するフォルダーの絶対パスを指定してください。')
     return os.path.normpath(str(path))
+
+
+def total_children_label(values, *, checking=False):
+    """Values include None for uninspected folders, never silently assume zero."""
+    values = tuple(values)
+    known = [value for value in values if value is not None]
+    text = (f'除外される直下：ファイル{sum(value.files for value in known):,}件・'
+            f'フォルダー{sum(value.directories for value in known):,}件')
+    for label, total in [('リンク', sum(value.links for value in known)),
+                         ('特殊ファイル', sum(value.other for value in known))]:
+        if total:
+            text += f'・{label}{total:,}件'
+    pending = sum(value is None for value in values)
+    partial = sum(not value.complete for value in known)
+    if checking and pending:
+        text += f'（確認中：{pending:,}フォルダー）'
+    if partial or (pending and not checking):
+        text += f'（未確認・一部集計：{partial + (pending if not checking else 0):,}フォルダー）'
+    return text
