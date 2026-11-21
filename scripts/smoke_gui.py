@@ -159,6 +159,8 @@ def check():
     from clam_gui.results import ScanStatus, ResultKind
     truncated = '出力が大きいため末尾のみ保存しています。' + chr(10)
     truncated += '/synthetic/large: Heuristics.Limits.Exceeded.MaxFileSize FOUND' + chr(10)
+    truncated += '/synthetic/private: Access denied' + chr(10)
+    truncated += "/synthetic/directory: Can't open directory." + chr(10)
     truncated += 'Infected files: 57' + chr(10)
     app.store.save('2026-11-20T02:00:00+09:00', plan.describe(),
                    ScanStatus('検査不完了', ResultKind.INCOMPLETE), truncated, key)
@@ -171,7 +173,12 @@ def check():
     assert not app.result.raw_loaded
     assert not app.result.raw_expander.get_expanded()
     reasons = app.result.reason_expanders
-    assert len(reasons) == 1 and reasons[0].get_child() is None
+    assert len(reasons) == 3 and reasons[0].get_child() is None
+    assert reasons[1].get_label() == '権限不足：1件'
+    assert reasons[2].get_label() == 'ディレクトリを開けない：1件'
+    for reason in reasons[1:]:
+        reason.set_expanded(True)
+        assert reason.get_child() is not None
     reasons[0].set_expanded(True)
     assert reasons[0].get_child() is not None
     app.result.raw_expander.set_expanded(True)

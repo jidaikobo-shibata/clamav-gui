@@ -173,3 +173,37 @@ class ReportTests(unittest.TestCase):
         report = build_report(entry(output, str(status), 0, status.assessment.kind))
         self.assertIn('保存先', report.action)
         self.assertNotIn('再検査', report.action)
+
+    def test_unsuffixed_access_denied_and_directory_failures_complete_error_counts(self):
+        output = ''.join(f'/example/data/{i}: Access denied\n' for i in range(110))
+        output += ''.join(f'/example/directory/{i}: Can\'t open directory.\n' for i in range(37))
+        output += '/example/large: Virus(es) detected ERROR\n' * 157
+        output += 'Total errors: 304\n'
+        report = build_report(entry(output))
+        groups = {group.title: group for group in report.groups}
+        self.assertEqual(groups['権限不足'].count, 110)
+        self.assertEqual(len(groups['権限不足'].examples), PREVIEW_LIMIT)
+        self.assertEqual(groups['権限不足'].examples[0].path, '/example/data/0')
+        self.assertEqual(groups['ディレクトリを開けない'].count, 37)
+        self.assertIn('参照権限', groups['ディレクトリを開けない'].action)
+        self.assertEqual(groups['その他の検査エラー'].count, 157)
+        self.assertIn('エラー明細は304件', report.coverage)
+        self.assertFalse(report.detections)
+
+    def test_unsuffixed_errors_support_colons_and_windows_paths(self):
+        paths = ['/example/a: b', r'C:\Users\Example\data', r'\\server\share\folder']
+        report = build_report(entry(''.join(path + ': Permission denied\n' for path in paths)))
+        self.assertEqual(report.groups[0].count, 3)
+        self.assertEqual([finding.path for finding in report.groups[0].examples], paths)
+
+    def test_plain_diagnostic_text_is_not_mistaken_for_file_error(self):
+        report = build_report(entry('note: Access denied\nExcluded\n/example/Access denied: Excluded\n'))
+        self.assertFalse(report.groups)
+        self.assertFalse(report.detections)
+
+    def test_directory_errors_with_and_without_suffix_share_one_group(self):
+        report = build_report(entry('/example/a: Can\'t open directory.\n'
+                                    '/example/b: Can\'t open directory. ERROR\n'))
+        self.assertEqual(len(report.groups), 1)
+        self.assertEqual(report.groups[0].title, 'ディレクトリを開けない')
+        self.assertEqual(report.groups[0].count, 2)

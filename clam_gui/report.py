@@ -50,6 +50,7 @@ GROUPS={
     'engine':('ClamAV本体のエラー','エラーに記載された定義ファイル・設定・読み取り権限などを確認してから再検査してください。'),
     'permission':('権限不足','対象ファイルの読み取り権限や保存場所を確認してください。'),
     'missing':('検査中に消失した対象','一時ファイルなら更新中の可能性があります。必要な対象が残っていれば再検査してください。'),
+    'directory':('ディレクトリを開けない','対象ディレクトリの参照権限・保存場所・メディアの接続状態を確認してください。'),
     'read':('読み取り失敗','ファイルやメディアが利用できるか確認してください。'),
     'error':('その他の検査エラー','ClamAVの報告内容を確認してください。この分類だけで脅威の検出とは判断できません。'),
     'warning':('その他の警告','ClamAVの報告内容と検査条件を確認してください。'),
@@ -66,7 +67,8 @@ def _warning_group(signature):
 
 
 def _error_group(reason):
-    reason=reason.casefold()
+    reason=reason.casefold().removesuffix(' error')
+    if reason=="can't open directory.":return 'directory'
     if 'permission denied' in reason or 'access denied' in reason:return 'permission'
     if 'no such file' in reason or 'not found' in reason:return 'missing'
     if any(value in reason for value in ('read error','i/o error','cannot read',"can't open",'cannot open')):return 'read'
@@ -104,7 +106,9 @@ def build_report(entry):
                 counts[key]+=1
                 if len(examples[key])<PREVIEW_LIMIT:examples[key].append(finding)
                 continue
-            if line.endswith(' ERROR') or line.startswith('ERROR:'):
+            plain_path_error=(separator and reason in ('Access denied','Permission denied',"Can't open directory.")
+                              and (path.startswith(('/', '\\')) or re.match(r'^[A-Za-z]:[\\/]',path)))
+            if line.endswith(' ERROR') or line.startswith('ERROR:') or plain_path_error:
                 error_lines+=1;key=_error_group(reason if separator else line)
             elif line.startswith(('WARNING:','LibClamAV Warning:')):
                 # App truncation warnings are explained by the coverage notice.
