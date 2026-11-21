@@ -254,6 +254,80 @@ def check():
         while child:
             yield from descendants(child)
             child = child.get_next_sibling()
+    # Grow a current plan from an old log, without restoring old settings.
+    from dataclasses import replace
+    from clam_gui.results import ScanStatus, ResultKind
+    fixture = app.store.path.parent/'folder-exclusion-tests'
+    fixture.mkdir()
+    db_folder, denied_folder, existing_folder, threat_folder = [fixture/name for name in ('database', 'blocked', 'existing', 'threat')]
+    for directory in (db_folder, denied_folder, existing_folder, threat_folder):
+        directory.mkdir()
+    exclusion_plan = Plan('古いプラン名', [str(fixture)], [])
+    exclusion_key = app.store.save_profile(exclusion_plan)
+    exclusion_output = str(db_folder/'a') + ': Access denied' + chr(10)
+    exclusion_output += str(db_folder/'b') + ': Access denied' + chr(10)
+    exclusion_output += str(denied_folder) + ": Can't open directory." + chr(10)
+    exclusion_output += str(existing_folder/'a') + ': Access denied' + chr(10)
+    exclusion_output += str(threat_folder/'test') + ': Test FOUND' + chr(10)
+    app.store.save('2026-11-21T02:00:00+09:00', exclusion_plan.describe(),
+                   ScanStatus('検査不完了', ResultKind.INCOMPLETE, True), exclusion_output, exclusion_key)
+    exclusion_current = replace(exclusion_plan, label='現在のプラン名', excluded_dirs=[str(existing_folder)])
+    app.store.save_profile(exclusion_current, exclusion_key)
+    app.refresh_profiles(exclusion_key)
+    settle_history()
+    import clam_gui.ui.exclusions as exclusion_ui
+    exclusion_ui.PAGE_SIZE = 2
+    app.result.folder_button.emit('clicked')
+    folders = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'フォルダー別の検査結果')
+    settle_history(folders)
+    assert '現在のプラン名' in folders.info.get_text()
+    assert folders.next.get_sensitive()
+    folders.next.emit('clicked')
+    assert not folders.checks[str(existing_folder)].get_sensitive()
+    assert not folders.checks[str(threat_folder)].get_sensitive()
+    folders.back.emit('clicked')
+    assert folders.checks[str(db_folder)].get_sensitive()
+    assert next(item for item in folders.folders if item.path == str(db_folder)).reasons == (('権限不足', 2),)
+    folders.checks[str(db_folder)].set_active(True)
+    folders.checks[str(denied_folder)].set_active(True)
+    folders.next.emit('clicked')
+    folders.back.emit('clicked')
+    assert folders.checks[str(db_folder)].get_active() and folders.checks[str(denied_folder)].get_active()
+    assert dict(app.store.profiles())[exclusion_key].excluded_dirs == [str(existing_folder)]
+    # Another editor changes a different setting while candidates are open.
+    exclusion_current = replace(exclusion_current, excludes=[str(fixture/'later.txt')], phishing=False)
+    app.store.save_profile(exclusion_current, exclusion_key)
+    folders.review.emit('clicked')
+    confirmation = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '除外するフォルダーの確認')
+    labels = [w.get_text() for w in descendants(confirmation) if isinstance(w, Gtk.Label)]
+    assert any('配下すべて' in label for label in labels)
+    assert any(str(db_folder) in label for label in labels)
+    next(w for w in descendants(confirmation) if isinstance(w, Gtk.Button) and w.get_label() == 'キャンセル').emit('clicked')
+    assert dict(app.store.profiles())[exclusion_key] == exclusion_current
+    folders.review.emit('clicked')
+    confirmation = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '除外するフォルダーの確認')
+    save_exclusions = next(w for w in descendants(confirmation) if isinstance(w, Gtk.Button) and w.get_label() == '除外を追加して保存')
+    with patch.object(app.store, 'add_excluded_folders', side_effect=OSError('synthetic storage failure')):
+        save_exclusions.emit('clicked')
+        assert confirmation.error_label.get_visible()
+        assert 'synthetic storage failure' in confirmation.error_label.get_text()
+        assert dict(app.store.profiles())[exclusion_key] == exclusion_current
+    save_exclusions.emit('clicked')
+    settle_history(folders)
+    settle_history()
+    merged = dict(app.store.profiles())[exclusion_key]
+    assert merged.excludes == exclusion_current.excludes and not merged.phishing
+    assert set(merged.excluded_dirs) == {str(existing_folder), str(db_folder), str(denied_folder)}
+    assert not folders.checks[str(db_folder)].get_sensitive()
+    assert '次回' in folders.message.get_text()
+    folders.destroy()
+    exclusion_ui.PAGE_SIZE = 50
+    app.store.delete_profile(exclusion_key)
+    with app.store.connect() as db:
+        assert db.execute('SELECT output FROM scans WHERE profile_id=?', (exclusion_key,)).fetchone()[0] == exclusion_output
+        db.execute('DELETE FROM scans WHERE profile_id=?', (exclusion_key,))
+    app.refresh_profiles(key)
+    settle_history()
     assert not app.window.get_modal()
     assert app.main_panes.get_parent() == app.window.get_child()
     app.show_notice('')

@@ -96,7 +96,7 @@ class HistoryController:
         elif entry is None:
             self.text.show_message('この履歴は整理されたため参照できません。履歴を再読み込みしてください。')
         else:
-            self.text.show_entry(entry, report)
+            self.text.show_entry(entry, report, profile_id=self.selected[0])
 
     def close(self):
         self.reader.close()
@@ -117,7 +117,7 @@ class HistoryView:
         listing.update_property([Gtk.AccessibleProperty.LABEL], ['外部メディアの検査完了日時'])
         scroll = Gtk.ScrolledWindow(width_request=210);scroll.set_child(listing)
         panes.set_start_child(scroll)
-        text = ReportPane()
+        text = ReportPane(self.store, self.refresh_profiles)
         text.update_property([Gtk.AccessibleProperty.LABEL], ['選択した外部メディア検査のログ'])
         scroll = Gtk.ScrolledWindow();scroll.set_child(text)
         panes.set_end_child(scroll);panes.set_position(230)

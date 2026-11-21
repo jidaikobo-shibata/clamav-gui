@@ -7,9 +7,11 @@ from ..async_reader import LatestReader
 
 
 class ReportPane(Gtk.Box):
-    def __init__(self):
+    def __init__(self, store=None, on_plan_changed=lambda: None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=16,
                          margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
+        self.store, self.on_plan_changed = store, on_plan_changed
+        self.plan_id = None
         self.entry = None
         self.report = None
         self.raw_loaded = False
@@ -77,9 +79,10 @@ class ReportPane(Gtk.Box):
         expander.set_expanded(expanded)
         return expander
 
-    def show_entry(self, entry, report):
+    def show_entry(self, entry, report, *, profile_id=None):
         self.clear()
         self.entry, self.report = entry, report
+        self.plan_id = profile_id
         self.summary_copy = Gtk.Button(label='結果全体をコピー', halign=Gtk.Align.END,
                                        tooltip_text='要約と全分類の保持済み明細をコピー')
         self.summary_copy.connect('clicked', lambda button: self.copy_report(button))
@@ -98,7 +101,13 @@ class ReportPane(Gtk.Box):
         self.append(grid)
         for caution in report.cautions:
             self.append(self.label(caution))
-        self.append(self.label('検出内容', 'heading'))
+        heading = Gtk.Box(spacing=8)
+        heading.append(self.label('検出内容', 'heading'))
+        self.folder_button = Gtk.Button(label='フォルダー別に見る…')
+        self.folder_button.add_css_class('flat')
+        self.folder_button.connect('clicked', self.show_folders)
+        heading.append(self.folder_button)
+        self.append(heading)
         if output_was_truncated(entry.output):
             self.append(self.label('ログの一部が省略されています。明細は保持された範囲のみです。', 'dim-label'))
         self.findings_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -171,3 +180,7 @@ class ReportPane(Gtk.Box):
             self.copy_reader.submit(load, done)
         except Exception as error:
             done(None, error)
+
+    def show_folders(self, _button):
+        from .exclusions import ExclusionWindow
+        ExclusionWindow(self).present()

@@ -285,6 +285,37 @@ class Store:
                        (key, plan.label.strip(), data))
         return key
 
+    def add_excluded_folders(self, key, folders, *, expected_target):
+        """Merge exclusions into the current plan without restoring a log snapshot."""
+        from .plan_exclusions import exclusion_state
+        if key == 'external-media':
+            raise ValueError('外部メディア検査はここでは変更できません。')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT name,data FROM profiles WHERE id=?', (key,)).fetchone()
+            if row is None:
+                raise ValueError('検査プランは削除されています。')
+            data = json.loads(row[1])
+            plan = Plan(row[0], **data)
+            if tuple(plan.targets) != tuple(expected_target):
+                raise ValueError('対象フォルダーが変更されています。候補画面を開き直してください。')
+            added = []
+            for folder in dict.fromkeys(os.path.normpath(str(item)) for item in folders):
+                state = exclusion_state(plan, folder)
+                if state == 'すでに除外されています。':
+                    continue
+                if state:
+                    raise ValueError(state)
+                added.append(folder)
+                plan = replace(plan, excluded_dirs=[*plan.excluded_dirs, folder])
+            validate_profile(plan)
+            if plan.kind == 'watch':
+                from .watch_scope import safe_watch_plan
+                safe_watch_plan(plan, self.path.parent)
+            data['excluded_dirs'] = plan.excluded_dirs
+            db.execute('UPDATE profiles SET data=? WHERE id=?', (json.dumps(data), key))
+        return added
+
     def duplicate_profile(self, key):
         with self.connect() as db:
             row = db.execute('SELECT name, data FROM profiles WHERE id=?', (key,)).fetchone()

@@ -124,7 +124,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         body.set_shrink_start_child(False)
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_start=12)
         right.append(Gtk.Label(label='選択した検査の結果', xalign=0))
-        self.result = ReportPane()
+        self.result = ReportPane(self.store, self.refresh_profiles)
         self.result.update_property([Gtk.AccessibleProperty.LABEL], ['選択した日時の検査ログ'])
         scroll = Gtk.ScrolledWindow(vexpand=True, hexpand=True)
         scroll.set_child(self.result)
