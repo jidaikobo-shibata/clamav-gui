@@ -21,6 +21,7 @@ class ExclusionWindow(Gtk.Window):
         self.draft_exclusions = []
         self.folders = ()
         self.path_labels = []
+        self.excluded_path_labels = []
         self.page = 0
         self.reader = LatestReader(GLib.idle_add)
         self.connect('unrealize', lambda *_: self.reader.close())
@@ -41,16 +42,17 @@ class ExclusionWindow(Gtk.Window):
         self.path_entry = Gtk.Entry(hexpand=True, placeholder_text='除外するフォルダーの絶対パス')
         caption.set_mnemonic_widget(self.path_entry)
         self.path_entry.update_property([Gtk.AccessibleProperty.LABEL], ['除外するフォルダーのパス'])
-        self.path_entry.connect('changed', self.highlight)
+        self.path_entry.connect('changed', self.search)
         self.path_entry.connect('activate', self.add_path)
         self.add_button = Gtk.Button(label='追加する', sensitive=False)
         self.add_button.connect('clicked', self.add_path)
         for widget in (caption, self.path_entry, self.add_button):
             row.append(widget)
         self.left_pane.append(row)
-        self.left_pane.append(pane.label('フォルダーと配下すべてを除外します。入力中は一致部分を強調するだけです。保存するまで設定は変わりません。', 'dim-label'))
         self.counter = pane.label('')
-        self.left_pane.append(self.counter)
+        self.counter.set_visible(False)
+        self.search_count = pane.label('ヒット：0件')
+        self.left_pane.append(self.search_count)
         self.message = pane.label('')
         self.right_pane.append(pane.label('現在の除外設定（フォルダー・保存前の変更案）', 'heading'))
         self.excluded_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -115,6 +117,11 @@ class ExclusionWindow(Gtk.Window):
         self.path_labels.append((path, label))
         return label
 
+    def search(self, *_args):
+        self.page = 0
+        self.render(candidates_only=True)
+        self.candidate_scroll.get_vadjustment().set_value(0)
+
     def highlight(self, *_args):
         query = self.path_entry.get_text()
         for path, label in self.path_labels:
@@ -126,30 +133,38 @@ class ExclusionWindow(Gtk.Window):
         while box.get_first_child():
             box.remove(box.get_first_child())
 
-    def render(self):
-        self.clear_box(self.excluded_list)
-        self.clear_box(self.listing)
-        self.path_labels = []
-        self.remove_buttons = {}
+    def render(self, *, candidates_only=False):
         editable = self.plan is not None and self.plan.kind != 'media'
-        for path in self.draft_exclusions:
-            row = Gtk.Box(spacing=8)
-            row.append(self.path_label(path))
-            remove = Gtk.Button(label='取り消す', sensitive=editable)
-            remove.add_css_class('flat')
-            remove.update_property([Gtk.AccessibleProperty.LABEL], [path + 'の除外を取り消す'])
-            remove.connect('clicked', lambda _, value=path: self.remove_path(value))
-            row.append(remove)
-            self.remove_buttons[path] = remove
-            self.excluded_list.append(row)
-        if not self.draft_exclusions:
-            self.excluded_list.append(self.pane.label('フォルダーの除外はありません。', 'dim-label'))
+        if not candidates_only:
+            self.clear_box(self.excluded_list)
+            self.path_labels = []
+            self.remove_buttons = {}
+            for path in self.draft_exclusions:
+                row = Gtk.Box(spacing=8)
+                row.append(self.path_label(path))
+                remove = Gtk.Button(label='取り消す', sensitive=editable)
+                remove.add_css_class('flat')
+                remove.update_property([Gtk.AccessibleProperty.LABEL], [path + 'の除外を取り消す'])
+                remove.connect('clicked', lambda _, value=path: self.remove_path(value))
+                row.append(remove)
+                self.remove_buttons[path] = remove
+                self.excluded_list.append(row)
+            if not self.draft_exclusions:
+                self.excluded_list.append(self.pane.label('フォルダーの除外はありません。', 'dim-label'))
+            self.excluded_path_labels = list(self.path_labels)
+        else:
+            self.path_labels = list(self.excluded_path_labels)
+        self.clear_box(self.listing)
         remaining = [item for item in self.folders if not covered_by(item.path, self.draft_exclusions)]
         self.counter.set_text(f'ログ中のフォルダー：除外後に残る {len(remaining):,} / {len(self.folders):,}件')
-        self.page = min(self.page, max(0, (len(remaining)-1)//PAGE_SIZE))
+        query = self.path_entry.get_text()
+        matches = [item for item in remaining if query in item.path]
+        self.search_count.set_text(f'ヒット：{len(matches):,}件')
+        self.page = min(self.page, max(0, (len(matches)-1)//PAGE_SIZE))
         start = self.page * PAGE_SIZE
         self.candidate_buttons = {}
-        for folder in remaining[start:start+PAGE_SIZE]:
+        self.detail_expanders = {}
+        for folder in matches[start:start+PAGE_SIZE]:
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
             row = Gtk.Box(spacing=6)
             path_button = Gtk.Button(hexpand=True, tooltip_text='このパスを入力欄へ入れる（まだ除外しません）')
@@ -165,15 +180,20 @@ class ExclusionWindow(Gtk.Window):
             copy.connect('clicked', lambda _, item=folder: self.get_clipboard().set(item.path))
             row.append(copy)
             box.append(row)
-            box.append(self.pane.label(' / '.join(f'{name}：{count:,}件' for name, count in folder.reasons), 'dim-label'))
-            expander = Gtk.Expander(label=f'明細：{len(folder.findings):,}件')
+            expander = Gtk.Expander(label=' / '.join(f'{name}：{count:,}件' for name, count in folder.reasons))
+            summary_label = expander.get_label_widget()
+            summary_label.set_wrap(True)
+            summary_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            summary_label.add_css_class('dim-label')
+            self.detail_expanders[folder.path] = expander
             expander.connect('notify::expanded', lambda widget, _, item=folder: self.fill_details(widget, item))
             box.append(expander)
             self.listing.append(box)
             self.listing.append(Gtk.Separator())
-        if not remaining:
-            self.listing.append(self.pane.label('ログに出たフォルダーは、すべて除外範囲に含まれています。' if self.folders else 'ログからフォルダーを抽出できませんでした。'))
-        total = len(remaining)
+        if not matches:
+            text = '一致する候補はありません。' if query else ('ログに出たフォルダーは、すべて除外範囲に含まれています。' if self.folders else 'ログからフォルダーを抽出できませんでした。')
+            self.listing.append(self.pane.label(text))
+        total = len(matches)
         self.page_label.set_text(f'{start+1 if total else 0}–{min(start+PAGE_SIZE,total)} / {total:,}フォルダー')
         self.back.set_sensitive(self.page > 0)
         self.next.set_sensitive(start + PAGE_SIZE < total)

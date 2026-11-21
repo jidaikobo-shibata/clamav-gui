@@ -290,15 +290,30 @@ def check():
     assert folders.excluded_scroll.get_max_content_height() == -1
     assert folders.excluded_scroll.get_vexpand() and folders.candidate_scroll.get_vexpand()
 
-    assert '3 / 4' in folders.counter.get_text()
+    assert not folders.counter.get_visible()
+    assert folders.search_count.get_text() == 'ヒット：3件'
     assert str(existing_folder) not in folders.candidate_buttons
     assert str(existing_folder) in folders.remove_buttons
     assert folders.next.get_sensitive()
     folders.next.emit('clicked')
     assert str(threat_folder) in folders.candidate_buttons
-    folders.back.emit('clicked')
-    folders.path_entry.set_text('data')
-    assert any('<b>data</b>' in label.get_label() for path, label in folders.path_labels if path == str(db_folder))
+    folders.path_entry.set_text('threat')
+    assert folders.search_count.get_text() == 'ヒット：1件'
+    assert list(folders.candidate_buttons) == [str(threat_folder)]
+    assert not folders.back.get_sensitive()
+    folders.path_entry.set_text('')
+    folders.path_entry.set_text('datab')
+    assert folders.search_count.get_text() == 'ヒット：1件'
+    assert list(folders.candidate_buttons) == [str(db_folder)]
+    detail = folders.detail_expanders[str(db_folder)]
+    assert detail.get_label() == '権限不足：2件'
+    detail.set_expanded(True)
+    assert detail.get_child() is not None
+    folders.path_entry.set_text('not-found-literal')
+    assert folders.search_count.get_text() == 'ヒット：0件'
+    assert not folders.candidate_buttons
+    folders.path_entry.set_text('datab')
+    assert any('<b>datab</b>' in label.get_label() for path, label in folders.path_labels if path == str(db_folder))
     folders.add_button.emit('clicked')
     assert folders.draft_exclusions == [str(existing_folder)]
     folders.path_entry.set_text(str(fixture))
@@ -307,6 +322,8 @@ def check():
     folders.path_entry.set_text(str(threat_folder))
     folders.add_button.emit('clicked')
     assert '脅威' in folders.message.get_text()
+    folders.path_entry.set_text('')
+    assert folders.search_count.get_text() == 'ヒット：3件'
     path_copy = folders.candidate_buttons[str(db_folder)].get_next_sibling()
     assert path_copy.get_tooltip_text() == 'フォルダーのパスをコピー'
     path_copy.emit('clicked')
@@ -323,8 +340,9 @@ def check():
     folders.path_entry.set_text(str(denied_folder))
     folders.add_button.emit('clicked')
     folders.remove_buttons[str(existing_folder)].emit('clicked')
+    folders.path_entry.set_text('')
     assert str(existing_folder) in folders.candidate_buttons
-    assert '2 / 4' in folders.counter.get_text()
+    assert folders.search_count.get_text() == 'ヒット：2件'
     # Other edits made while this draft is open must survive save.
     concurrent_folder = fixture/'concurrent'
     concurrent_folder.mkdir()
