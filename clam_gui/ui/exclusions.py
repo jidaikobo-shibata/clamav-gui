@@ -1,10 +1,13 @@
 """Draft folder exclusions from retained logs, with explicit confirmation."""
 from dataclasses import replace
 import os
-from gi.repository import GLib, Gtk, Pango
+import threading
+import time
+from gi.repository import Gio, GLib, Gtk, Pango
 from ..async_reader import LatestReader
 from ..plan_exclusions import exclusion_state, folder_reports, covered_by, highlight_path
 from ..report import build_report
+from ..folder_info import count_children, local_folder_path
 
 PAGE_SIZE = 50
 
@@ -24,7 +27,13 @@ class ExclusionWindow(Gtk.Window):
         self.excluded_path_labels = []
         self.page = 0
         self.reader = LatestReader(GLib.idle_add)
-        self.connect('unrealize', lambda *_: self.reader.close())
+        self.count_reader = LatestReader(GLib.idle_add)
+        self.open_reader = LatestReader(GLib.idle_add)
+        self.count_cancel = threading.Event()
+        self.open_cancel = Gio.Cancellable()
+        self.count_cache = {}
+        self.opening = False
+        self.connect('unrealize', self.closed)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
                       margin_start=16, margin_end=16, margin_top=16, margin_bottom=16)
         self.set_child(box)
@@ -46,7 +55,10 @@ class ExclusionWindow(Gtk.Window):
         self.path_entry.connect('activate', self.add_path)
         self.add_button = Gtk.Button(label='追加する', sensitive=False)
         self.add_button.connect('clicked', self.add_path)
-        for widget in (caption, self.path_entry, self.add_button):
+        self.open_button = Gtk.Button(label='フォルダーを開く', sensitive=False,
+                                      tooltip_text='入力したフォルダーをファイルマネージャーで開く')
+        self.open_button.connect('clicked', self.open_folder)
+        for widget in (caption, self.path_entry, self.open_button, self.add_button):
             row.append(widget)
         self.left_pane.append(row)
         self.counter = pane.label('')
@@ -127,6 +139,7 @@ class ExclusionWindow(Gtk.Window):
         for path, label in self.path_labels:
             label.set_markup(highlight_path(path, query))
         self.add_button.set_sensitive(bool(query) and self.plan is not None and self.plan.kind != 'media')
+        self.open_button.set_sensitive(os.path.isabs(query) and not self.opening)
 
     @staticmethod
     def clear_box(box):
@@ -164,6 +177,7 @@ class ExclusionWindow(Gtk.Window):
         start = self.page * PAGE_SIZE
         self.candidate_buttons = {}
         self.detail_expanders = {}
+        self.count_labels = {}
         for folder in matches[start:start+PAGE_SIZE]:
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
             row = Gtk.Box(spacing=6)
@@ -180,6 +194,10 @@ class ExclusionWindow(Gtk.Window):
             copy.connect('clicked', lambda _, item=folder: self.get_clipboard().set(item.path))
             row.append(copy)
             box.append(row)
+            counts = self.pane.label('直下：確認中…', 'dim-label')
+            counts.set_tooltip_text('現在の直下の件数です（配下全体・ログ取得時の件数ではありません）。取得結果は最大1分間再利用します。リンクは追跡せず、大きいフォルダーは集計を打ち切ります。')
+            self.count_labels[folder.path] = counts
+            box.append(counts)
             expander = Gtk.Expander(label=' / '.join(f'{name}：{count:,}件' for name, count in folder.reasons))
             summary_label = expander.get_label_widget()
             summary_label.set_wrap(True)
@@ -199,6 +217,7 @@ class ExclusionWindow(Gtk.Window):
         self.next.set_sensitive(start + PAGE_SIZE < total)
         self.review.set_sensitive(editable and set(self.initial_exclusions) != set(self.draft_exclusions))
         self.highlight()
+        self.refresh_counts()
 
     def add_path(self, *_args):
         if self.plan is None or not self.path_entry.get_text():
@@ -214,7 +233,7 @@ class ExclusionWindow(Gtk.Window):
         affected = [item for item in self.folders if covered_by(item.path, [path]) and
                     not covered_by(item.path, self.draft_exclusions)]
         self.draft_exclusions.append(path)
-        self.message.set_text(f'変更案に追加しました。ログ中の{len(affected):,}フォルダー・'
+        self.message.set_text(f'このフォルダーと配下すべてを除外する変更案を追加しました。ログ中の{len(affected):,}フォルダー・'
                               f'{sum(len(item.findings) for item in affected):,}件の報告が除外範囲に入ります。まだ保存していません。')
         self.page = 0
         self.render()
@@ -305,3 +324,83 @@ class ExclusionWindow(Gtk.Window):
             self.reader.submit(self.load, self.loaded)
         except Exception as error:
             self.message.set_text('除外は保存済みですが、表示を更新できませんでした：' + str(error))
+
+    def closed(self, *_args):
+        self.reader.close()
+        self.count_cancel.set()
+        self.count_reader.close()
+        self.open_reader.close()
+        self.open_cancel.cancel()
+
+    def refresh_counts(self):
+        self.count_cancel.set()
+        cancel = self.count_cancel = threading.Event()
+        labels = dict(self.count_labels)
+        now = time.monotonic()
+        missing = []
+        for path, label in labels.items():
+            cached = self.count_cache.get(path)
+            if cached and now-cached[0] < 60:
+                label.set_text(cached[1].label())
+            else:
+                missing.append(path)
+        if not missing:
+            return
+        def load():
+            values = {}
+            for path in missing:
+                if cancel.is_set():
+                    break
+                value = count_children(path, cancel=cancel)
+                if value is not None:
+                    values[path] = (time.monotonic(), value)
+            return values
+        def done(values, error):
+            if error:
+                for path in missing:
+                    labels[path].set_text('直下：確認できません')
+                return
+            for path, value in values.items():
+                self.count_cache[path] = value
+                labels[path].set_text(value[1].label())
+        try:
+            self.count_reader.submit(load, done)
+        except Exception as error:
+            done(None, error)
+
+    def open_folder(self, _button):
+        if self.opening:
+            return
+        text = self.path_entry.get_text()
+        self.opening = True
+        self.highlight()
+        def done(path, error):
+            if not self.get_visible():
+                return
+            if error:
+                self.opening = False
+                self.highlight()
+                self.message.set_text('開けませんでした：' + str(error))
+                return
+            try:
+                self.folder_launcher = Gtk.FileLauncher.new(Gio.File.new_for_path(path))
+                self.folder_launcher.launch(self, self.open_cancel, self.open_finished)
+            except Exception as error:
+                self.opening = False
+                self.highlight()
+                self.message.set_text('開けませんでした：' + str(error))
+        try:
+            self.open_reader.submit(lambda: local_folder_path(text), done)
+        except Exception as error:
+            done(None, error)
+
+    def open_finished(self, launcher, result):
+        self.opening = False
+        if not self.get_visible():
+            return
+        self.highlight()
+        try:
+            launcher.launch_finish(result)
+            self.message.set_text('フォルダーを開きました。確認後、この画面で除外を追加できます。')
+        except Exception as error:
+            self.message.set_text('開けませんでした：' + str(error))

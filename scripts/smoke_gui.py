@@ -305,6 +305,8 @@ def check():
     folders.path_entry.set_text('datab')
     assert folders.search_count.get_text() == 'ヒット：1件'
     assert list(folders.candidate_buttons) == [str(db_folder)]
+    settle_history(type('ReaderController', (), {'reader': folders.count_reader})())
+    assert folders.count_labels[str(db_folder)].get_text() == '直下：ファイル0件・フォルダー0件'
     detail = folders.detail_expanders[str(db_folder)]
     assert detail.get_label() == '権限不足：2件'
     detail.set_expanded(True)
@@ -330,6 +332,21 @@ def check():
     assert clipboard_text(folders) == str(db_folder)
     folders.candidate_buttons[str(db_folder)].emit('clicked')
     assert folders.path_entry.get_text() == str(db_folder)
+    with patch('clam_gui.ui.exclusions.Gtk.FileLauncher.new') as launcher_new:
+        folders.open_button.emit('clicked')
+        settle_history(type('ReaderController', (), {'reader': folders.open_reader})())
+        launcher_new.assert_called_once()
+        assert launcher_new.call_args.args[0].get_path() == str(db_folder)
+        launcher = launcher_new.return_value
+        assert launcher.launch.call_args.args[0] == folders
+        launcher.launch_finish.return_value = True
+        folders.open_finished(launcher, None)
+        folders.path_entry.set_text(str(fixture/'missing'))
+        folders.open_button.emit('clicked')
+        settle_history(type('ReaderController', (), {'reader': folders.open_reader})())
+        assert launcher_new.call_count == 1
+        assert '開けませんでした' in folders.message.get_text()
+    folders.path_entry.set_text(str(db_folder))
     folders.add_button.emit('clicked')
     assert str(db_folder) not in folders.candidate_buttons
     assert '1フォルダー・2件' in folders.message.get_text()
