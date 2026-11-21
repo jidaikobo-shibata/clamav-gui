@@ -19,7 +19,7 @@ def report_text(report):
     add('\n'.join(f'{name}：{value}' for name, value in report.metrics))
     for caution in report.cautions:
         add(caution, 'heading')
-    add('検出内容・確認が必要な理由', 'heading')
+    add('検出内容', 'heading')
     add(report.coverage)
     for group in report.detections + report.groups:
         add(f'{group.title}：{group.count:,}件', 'heading')

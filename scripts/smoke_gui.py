@@ -189,9 +189,23 @@ def check():
     assert not app.result.raw_expander.get_expanded()
     reasons = app.result.reason_expanders
     assert len(reasons) == 3
+    assert app.result.findings_box.get_spacing() <= 4
+    def report_labels(widget):
+        if isinstance(widget, Gtk.Label):
+            yield widget.get_text()
+        child = widget.get_first_child()
+        while child:
+            yield from report_labels(child)
+            child = child.get_next_sibling()
+    labels = list(report_labels(app.result))
+    assert '検出内容' in labels
+    assert app.result.report.coverage not in labels
+    assert 'ログの一部が省略されています。明細は保持された範囲のみです。' in labels
     for reason in reasons:
         assert not reason.get_expanded() and reason.get_child() is None
         assert reason.copy_button.get_visible()
+        assert reason.copy_button.get_icon_name() == 'edit-copy-symbolic'
+        assert reason.copy_button.has_css_class('flat')
     # Copy works while the category remains collapsed.
     reasons[1].copy_button.emit('clicked')
     settle_history(type('ReaderController', (), {'reader': app.result.copy_reader})())

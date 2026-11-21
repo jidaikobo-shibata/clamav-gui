@@ -2,6 +2,7 @@
 from gi.repository import GLib, Gtk, Pango
 from ..report_text import report_text, group_text
 from ..report import build_report
+from ..results import output_was_truncated
 from ..async_reader import LatestReader
 
 
@@ -53,25 +54,26 @@ class ReportPane(Gtk.Box):
             self.raw_loaded = True
         return self.raw.get_buffer()
 
-    def details(self, title, fill, expanded=False, copy_callback=None):
+    def details(self, title, fill, expanded=False, copy_callback=None, container=None):
         expander = Gtk.Expander(label=title)
         def populate(widget, _property):
             if widget.get_expanded() and widget.get_child() is None:
                 widget.set_child(fill())
         expander.connect('notify::expanded', populate)
         if copy_callback:
-            row = Gtk.Box(spacing=12)
+            row = Gtk.Box(spacing=6)
             expander.set_hexpand(True)
             row.append(expander)
-            button = Gtk.Button(label='コピー', valign=Gtk.Align.START,
+            button = Gtk.Button(icon_name='edit-copy-symbolic', valign=Gtk.Align.START,
                                 tooltip_text='この分類の保持済み明細を全件コピー（表示上限にかかわらず）')
+            button.add_css_class('flat')
             button.update_property([Gtk.AccessibleProperty.LABEL], [title + 'の保持済み明細を全件コピー'])
             button.connect('clicked', copy_callback)
             expander.copy_button = button
             row.append(button)
-            self.append(row)
+            (container if container is not None else self).append(row)
         else:
-            self.append(expander)
+            (container if container is not None else self).append(expander)
         expander.set_expanded(expanded)
         return expander
 
@@ -96,8 +98,11 @@ class ReportPane(Gtk.Box):
         self.append(grid)
         for caution in report.cautions:
             self.append(self.label(caution))
-        self.append(self.label('検出内容・確認が必要な理由', 'heading'))
-        self.append(self.label(report.coverage, 'dim-label'))
+        self.append(self.label('検出内容', 'heading'))
+        if output_was_truncated(entry.output):
+            self.append(self.label('ログの一部が省略されています。明細は保持された範囲のみです。', 'dim-label'))
+        self.findings_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.append(self.findings_box)
         self.finding_expanders = [self.group(group, True) for group in report.detections]
         self.reason_expanders = [self.group(group) for group in report.groups]
         if not report.groups and not report.detections:
@@ -137,7 +142,8 @@ class ReportPane(Gtk.Box):
             expander.preview_view = view
             return scroll
         expander = self.details(f'{group.title}：{group.count:,}件', fill,
-                                copy_callback=lambda button: self.copy_report(button, group.title))
+                                copy_callback=lambda button: self.copy_report(button, group.title),
+                                container=self.findings_box)
         expander.set_expanded(expanded)
         return expander
 
