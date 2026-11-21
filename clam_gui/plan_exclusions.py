@@ -3,6 +3,7 @@ from collections import Counter
 from dataclasses import dataclass
 import os
 from pathlib import Path
+from .known_locations import trash_folder
 
 ELIGIBLE_REASONS = {'権限不足', 'ディレクトリを開けない'}
 
@@ -47,7 +48,9 @@ def exclusion_state(plan, folder, threats=()):
         if real_root == real_path or real_root not in real_path.parents:
             return 'リンク先が検査対象全体・対象外の場所になるため選択できません。'
         if not path.is_dir():
-            return '現在のフォルダーを確認できません。'
+            # Register the known trash before first use without creating it.
+            if not (path == trash_folder() and not path.exists() and not path.is_symlink()):
+                return '現在のフォルダーを確認できません。'
         for target in threats:
             detected = Path(os.path.normpath(str(target)))
             resolved = detected.resolve()

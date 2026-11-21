@@ -6,6 +6,8 @@ from pathlib import Path
 import threading
 from gi.repository import GLib, Gtk
 from ..core import Plan
+from ..known_locations import trash_folder, location_label
+from ..plan_exclusions import exclusion_state
 from ..jobs import start_worker
 from ..schedule import Schedule, read_schedule
 
@@ -125,8 +127,9 @@ class PlanEditor:
                 listing.remove(listing.get_first_child())
             for item in exclusions:
                 row = Gtk.Box(spacing=8)
-                text = Gtk.Label(label=('フォルダー: ' if item[1] else 'ファイル: ') + item[0],
+                text = Gtk.Label(label=('フォルダー: ' if item[1] else 'ファイル: ') + (location_label(item[0]) if item[1] else item[0]),
                                  xalign=0, wrap=True, hexpand=True, selectable=True)
+                text.set_tooltip_text(item[0])
                 row.append(text)
                 remove = Gtk.Button(label='除外を取り消す')
                 def remove_item(_button, value=item):
@@ -140,6 +143,22 @@ class PlanEditor:
             if item not in exclusions:
                 exclusions.append(item)
                 refresh()
+        if trash_folder() is not None:
+            trash = Gtk.Button(label='ごみ箱を除外に追加', halign=Gtk.Align.START)
+            trash.set_tooltip_text(str(trash_folder()) + '\nホーム側のごみ箱の内容のみが対象です。保存するまで反映されません。')
+            trash_notice = Gtk.Label(xalign=0, wrap=True)
+            def add_trash(_button):
+                path = str(trash_folder())
+                draft = replace(plan, targets=[root.get_text()], excluded_dirs=[p for p, directory in exclusions if directory])
+                reason = exclusion_state(draft, path)
+                if reason:
+                    trash_notice.set_text(reason)
+                else:
+                    add(path, True)
+                    trash_notice.set_text('ごみ箱を除外候補に追加しました。保存するまで反映されません。')
+            trash.connect('clicked', add_trash)
+            box.append(trash)
+            box.append(trash_notice)
         refresh()
         exclusion_actions = Gtk.Box(spacing=8, homogeneous=True)
         box.append(exclusion_actions)

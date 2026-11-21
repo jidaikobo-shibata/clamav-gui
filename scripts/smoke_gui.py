@@ -439,6 +439,42 @@ def check():
         db.execute('DELETE FROM scans WHERE profile_id=?', (exclusion_key,))
     app.refresh_profiles(key)
     settle_history()
+    from clam_gui.known_locations import trash_folder
+    trash_path = str(trash_folder())
+    trash_plan = Plan('ごみ箱テスト', [str(app.store.path.parent.parent)], [])
+    trash_key = app.store.save_profile(trash_plan)
+    app.store.save('2026-11-21T02:00:00+09:00', trash_plan.describe(), '検査完了', '', trash_key)
+    app.refresh_profiles(trash_key)
+    settle_history()
+    app.result.folder_button.emit('clicked')
+    trash_window = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'フォルダー別の検査結果')
+    settle_history(trash_window)
+    assert trash_window.trash_button.get_visible() and trash_window.trash_button.get_sensitive()
+    trash_window.trash_button.emit('clicked')
+    assert trash_window.path_entry.get_text() == ''
+    assert trash_path in trash_window.draft_exclusions
+    labels = [w for w in descendants(trash_window.excluded_list) if isinstance(w, Gtk.Label)]
+    assert any(w.get_text() == 'ごみ箱' and w.get_tooltip_text() == trash_path for w in labels)
+    assert dict(app.store.profiles())[trash_key].excluded_dirs == []
+    assert not trash_window.trash_button.get_sensitive()
+    trash_window.review.emit('clicked')
+    confirmation = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '除外設定の変更を確認')
+    labels = [w.get_text() for w in descendants(confirmation) if isinstance(w, Gtk.Label)]
+    assert any('ごみ箱' in value and trash_path in value for value in labels)
+    next(w for w in descendants(confirmation) if isinstance(w, Gtk.Button) and w.get_label() == '保存').emit('clicked')
+    settle_history(trash_window)
+    settle_history()
+    assert dict(app.store.profiles())[trash_key].excluded_dirs == [trash_path]
+    trash_window.destroy()
+    app.edit_profile(trash_key, dict(app.store.profiles())[trash_key])
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+    assert any(w.get_text() == 'フォルダー: ごみ箱' for w in descendants(editor) if isinstance(w, Gtk.Label))
+    editor.destroy()
+    app.store.delete_profile(trash_key)
+    with app.store.connect() as db:
+        db.execute('DELETE FROM scans WHERE profile_id=?', (trash_key,))
+    app.refresh_profiles(key)
+    settle_history()
     assert not app.window.get_modal()
     assert app.main_panes.get_parent() == app.window.get_child()
     app.show_notice('')

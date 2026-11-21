@@ -1,12 +1,14 @@
 """Draft folder exclusions from retained logs, with explicit confirmation."""
 from dataclasses import replace
 import os
+from pathlib import Path
 import threading
 import time
 from gi.repository import Gio, GLib, Gtk, Pango
 from ..async_reader import LatestReader
 from ..plan_exclusions import exclusion_state, folder_reports, covered_by, highlight_path
 from ..report import build_report
+from ..known_locations import trash_folder, resolve_location, location_label, location_confirmation
 from ..folder_info import count_children, local_folder_path, total_children_label
 
 PAGE_SIZE = 50
@@ -57,6 +59,10 @@ class ExclusionWindow(Gtk.Window):
         self.reason_handler = self.reason_filter.connect('notify::selected', self.search)
         reason_row.append(reason_caption)
         reason_row.append(self.reason_filter)
+        self.trash_button = Gtk.Button(label='ごみ箱を追加')
+        self.trash_button.set_tooltip_text('ホーム側のごみ箱の内容を除外候補に追加します。保存までは反映しません。外部メディアのごみ箱は含みません。\n' + str(trash_folder() or ''))
+        self.trash_button.connect('clicked', self.add_trash)
+        reason_row.append(self.trash_button)
         self.left_pane.append(reason_row)
         row = Gtk.Box(spacing=8)
         caption = Gtk.Label(label='パス')
@@ -153,7 +159,8 @@ class ExclusionWindow(Gtk.Window):
     def path_label(self, path):
         label = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR,
                           max_width_chars=65, hexpand=True)
-        label.set_markup(highlight_path(path, self.path_entry.get_text()))
+        label.set_markup(highlight_path(location_label(path), self.path_entry.get_text()))
+        label.set_tooltip_text(str(path))
         self.path_labels.append((path, label))
         return label
 
@@ -165,9 +172,15 @@ class ExclusionWindow(Gtk.Window):
     def highlight(self, *_args):
         query = self.path_entry.get_text()
         for path, label in self.path_labels:
-            label.set_markup(highlight_path(path, query))
+            label.set_markup(highlight_path(location_label(path), query))
         self.add_button.set_sensitive(bool(query) and self.plan is not None and self.plan.kind != 'media')
-        self.open_button.set_sensitive(os.path.isabs(query) and not self.opening)
+        self.open_button.set_sensitive(os.path.isabs(resolve_location(query)) and not self.opening)
+        trash = trash_folder()
+        root = self.plan.targets[0] if self.plan else None
+        in_scope = bool(trash is not None and root and trash != Path(os.path.normpath(root)) and covered_by(trash, [root]))
+        editable = self.plan is not None and self.plan.kind != 'media'
+        self.trash_button.set_visible(in_scope and editable)
+        self.trash_button.set_sensitive(in_scope and editable and not covered_by(trash, self.draft_exclusions))
 
     @staticmethod
     def clear_box(box):
@@ -185,7 +198,7 @@ class ExclusionWindow(Gtk.Window):
                 row.append(self.path_label(path))
                 remove = Gtk.Button(label='取り消す', sensitive=editable)
                 remove.add_css_class('flat')
-                remove.update_property([Gtk.AccessibleProperty.LABEL], [path + 'の除外を取り消す'])
+                remove.update_property([Gtk.AccessibleProperty.LABEL], [location_label(path) + 'の除外を取り消す'])
                 remove.connect('clicked', lambda _, value=path: self.remove_path(value))
                 row.append(remove)
                 self.remove_buttons[path] = remove
@@ -201,7 +214,7 @@ class ExclusionWindow(Gtk.Window):
         query = self.path_entry.get_text()
         reason_index = self.reason_filter.get_selected()
         reason = self.reason_names[reason_index] if 0 < reason_index < len(self.reason_names) else None
-        matches = [item for item in remaining if query in item.path and
+        matches = [item for item in remaining if (query in item.path or query in location_label(item.path)) and
                    (reason is None or any(name == reason for name, _ in item.reasons))]
         self.matched_paths = tuple(item.path for item in matches)
         self.search_count.set_text(f'ヒット：{len(matches):,}件')
@@ -213,7 +226,7 @@ class ExclusionWindow(Gtk.Window):
         for folder in matches[start:start+PAGE_SIZE]:
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
             row = Gtk.Box(spacing=6)
-            path_button = Gtk.Button(hexpand=True, tooltip_text='このパスを入力欄へ入れる（まだ除外しません）')
+            path_button = Gtk.Button(hexpand=True, tooltip_text=folder.path + '\nこのパスを入力欄へ入れる（まだ除外しません）')
             path_button.add_css_class('flat')
             path_button.set_child(self.path_label(folder.path))
             path_button.update_property([Gtk.AccessibleProperty.LABEL], [folder.path + 'を入力欄へ'])
@@ -255,7 +268,7 @@ class ExclusionWindow(Gtk.Window):
         if self.plan is None or not self.path_entry.get_text():
             return
         # normpath alone would turn a partial/relative input into a misleading candidate.
-        raw = self.path_entry.get_text()
+        raw = resolve_location(self.path_entry.get_text())
         draft = replace(self.plan, excluded_dirs=list(self.draft_exclusions))
         reason = exclusion_state(draft, raw, self.threats)
         if reason:
@@ -329,8 +342,8 @@ class ExclusionWindow(Gtk.Window):
         text = '追加するフォルダーと配下すべては、次回から検査対象外になります。取り消した除外範囲は、他の除外に含まれなければ再び検査対象になります。実際のファイルは変更しません。'
         box.append(self.pane.label(text))
         listing = Gtk.ScrolledWindow(vexpand=True)
-        changes = ('追加（配下すべてを除外）\n' + '\n'.join(additions) if additions else '')
-        changes += ('\n\n取り消す除外\n' + '\n'.join(removals) if removals else '')
+        changes = ('追加（配下すべてを除外）\n' + '\n\n'.join(location_confirmation(path) for path in additions) if additions else '')
+        changes += ('\n\n取り消す除外\n' + '\n\n'.join(location_confirmation(path) for path in removals) if removals else '')
         listing.set_child(self.pane.label(changes))
         box.append(listing)
         dialog.error_label = self.pane.label('')
@@ -422,7 +435,7 @@ class ExclusionWindow(Gtk.Window):
     def open_folder(self, _button):
         if self.opening:
             return
-        text = self.path_entry.get_text()
+        text = resolve_location(self.path_entry.get_text())
         self.opening = True
         self.highlight()
         def done(path, error):
@@ -455,3 +468,7 @@ class ExclusionWindow(Gtk.Window):
             self.message.set_text('フォルダーを開きました。確認後、この画面で除外を追加できます。')
         except Exception as error:
             self.message.set_text('開けませんでした：' + str(error))
+
+    def add_trash(self, _button):
+        self.path_entry.set_text('ごみ箱')
+        self.add_path()
