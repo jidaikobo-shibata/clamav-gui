@@ -84,7 +84,7 @@ LIMITS = {
 }
 
 
-APP_LIMITS = {'max-filesize': 256, 'max-scansize': None}
+APP_LIMITS = {'max-filesize': 256, 'max-scansize': 256}
 
 def validate_limits(limits):
     if set(limits) != set(LIMITS):

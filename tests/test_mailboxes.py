@@ -62,7 +62,7 @@ class MailboxTests(unittest.TestCase):
                 process.wait.return_value = 1
                 return process
             with patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), \
-                 patch('clam_gui.core.supported_options', return_value=set(DEFAULTS) | {'max-filesize'}), \
+                 patch('clam_gui.core.supported_options', return_value=set(DEFAULTS) | {'max-filesize', 'max-scansize'}), \
                  patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner', side_effect=fake_scan):
                 status, output = scan(Plan('test', [root], []), store, lock_path=Path(root)/'lock')
             self.assertIn(MAILBOX_NOTE, status)

@@ -11,7 +11,7 @@ from clam_gui.core import Store, scan, summarize
 class CoreTestCase(unittest.TestCase):
     def setUp(self):
         from clam_gui.options import DEFAULTS
-        support = patch('clam_gui.core.supported_options', return_value=set(DEFAULTS) | {'max-filesize'})
+        support = patch('clam_gui.core.supported_options', return_value=set(DEFAULTS) | {'max-filesize', 'max-scansize'})
         support.start()
         self.addCleanup(support.stop)
 
@@ -48,7 +48,7 @@ class ScannerTests(CoreTestCase):
                 self.assertEqual(args[-2:], ['--', root])
                 self.assertNotIn('--remove', args)
                 self.assertIn('--max-filesize=256M', args)
-                self.assertFalse(any(arg.startswith('--max-scansize=') for arg in args))
+                self.assertIn('--max-scansize=256M', args)
                 self.assertIn('中止', status)
                 self.assertEqual(store.recent()[0][2], status)
 

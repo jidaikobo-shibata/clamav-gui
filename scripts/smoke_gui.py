@@ -883,7 +883,7 @@ def check():
     assert len(preferences) == 1
     widgets = list(descendants(preferences[0]))
     checks = [w for w in widgets if isinstance(w, Gtk.CheckButton)]
-    assert len(checks) == 24
+    assert len(checks) == 22
     phishing = next(w for w in checks if w.get_label() == 'メールのフィッシング検査')
     assert not phishing.get_active()
     phishing.set_active(True)
@@ -926,30 +926,22 @@ def check():
             app.configure_automation()
             assert app.monitor_lease.file
             settings['media_enabled'] = False;app.store.set_automation_settings(settings);app.refresh_profiles()
-        spins = [w for w in widgets if isinstance(w, Gtk.SpinButton) and isinstance(w.get_parent().get_first_child(), Gtk.CheckButton)]
-        limit_checks = [w for w in checks if w.get_label() == 'ClamAV標準値を使う']
-        assert len(spins) == 2 and len(limit_checks) == 2
-        for check in limit_checks:
-            check.set_active(False)
+        spins = [w for w in widgets if isinstance(w, Gtk.SpinButton) and w.get_parent().get_first_child() == w]
+        assert len(spins) == 2
+        assert [spin.get_value_as_int() for spin in spins] == [256, 256]
+        assert not any(w.get_label() == 'ClamAV標準値を使う' for w in checks)
+        assert not any(isinstance(w, Gtk.Button) and w.get_label() == 'サイズ上限をアプリ標準に戻す' for w in widgets)
+        references = [w for w in widgets if isinstance(w, Gtk.Label) and w.get_text().startswith('（ClamAV標準は')]
+        assert {w.get_text() for w in references} == {'（ClamAV標準は100 MiB）', '（ClamAV標準は400 MiB）'}
+        assert all(w.has_css_class('caption') for w in references)
         spins[0].set_value(256)
         spins[1].set_value(512)
         save.emit('clicked')
         assert app.store.scan_limits() == {'max-filesize': 256, 'max-scansize': 512}
-        assert app.store.scan_options()['phishing-sigs']
-        assert not app.store.scan_options()['phishing-scan-urls']
         reset = next(w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() == 'ClamAV標準に戻す')
         reset.emit('clicked')
-        assert phishing.get_active()
-        assert all(check.get_active() for check in limit_checks)
+        assert [spin.get_value_as_int() for spin in spins] == [100, 400]
         assert app.store.scan_limits()['max-filesize'] == 256
-        assert app.store.scan_options()['phishing-sigs']
-        app_reset = next(w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() == 'サイズ上限をアプリ標準に戻す')
-        app_reset.emit('clicked')
-        assert not limit_checks[0].get_active() and limit_checks[1].get_active()
-        assert spins[0].get_value_as_int() == 256
-        assert app.store.scan_limits()['max-scansize'] == 512
-        save.emit('clicked')
-        assert app.store.scan_limits() == {'max-filesize': 256, 'max-scansize': None}
         preferences[0].destroy()
         from clam_gui.packages import PackagePlan, PACKAGES
         class FakePackages:

@@ -165,37 +165,23 @@ class PreferencesWindow:
         limit_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16,
                             margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
         pages.append_page(limit_page, Gtk.Label(label='サイズ上限'))
-        for key, (label, explanation) in LIMITS.items():
+        engine_limits = {'max-filesize': 100, 'max-scansize': 400}
+        for key, (label, _explanation) in LIMITS.items():
             limit_page.append(Gtk.Label(label=label, xalign=0))
-            limit_page.append(Gtk.Label(label=explanation + (' アプリ標準は256 MiBです。' if key == 'max-filesize' else ' アプリ標準はClamAV標準値です。'), xalign=0, wrap=True))
-            row_limits = Gtk.Box(spacing=12)
-            standard = Gtk.CheckButton(label='ClamAV標準値を使う', active=limit_values[key] is None)
-            standard.update_property([Gtk.AccessibleProperty.LABEL], [label + 'にClamAV標準値を使う'])
+            row_limits = Gtk.Box(spacing=8)
             spin = Gtk.SpinButton.new_with_range(1, 2047, 1)
-            spin.set_value(limit_values[key] or APP_LIMITS[key] or 100)
+            spin.set_value(limit_values[key] if limit_values[key] is not None else APP_LIMITS[key])
             spin.set_numeric(True)
             spin.update_property([Gtk.AccessibleProperty.LABEL], [label + '（MiB）'])
             spin.set_sensitive(False)
-            standard.set_sensitive(False)
-            standard.connect('toggled', lambda check, control=spin:
-                             control.set_sensitive(check.get_sensitive() and not check.get_active()))
-            row_limits.append(standard)
+            reference = Gtk.Label(label=f'（ClamAV標準は{engine_limits[key]} MiB）')
+            reference.add_css_class('caption')
+            reference.add_css_class('dim-label')
             row_limits.append(spin)
             row_limits.append(Gtk.Label(label='MiB'))
+            row_limits.append(reference)
             limit_page.append(row_limits)
-            limit_controls[key] = (standard, spin)
-        limit_page.append(Gtk.Label(label='1 MiB = 1,048,576バイト。指定範囲は1〜2047 MiBです。\n'
-            '標準値を使う場合はClamAVへ数値を指定しません。\n'
-            '両方を指定するときは合計上限を1ファイルの上限以上にしてください。\n'
-            '上限を超えた対象は検査不完了として報告します。', xalign=0, wrap=True))
-        app_limits_reset = Gtk.Button(label='サイズ上限をアプリ標準に戻す', sensitive=False, halign=Gtk.Align.START)
-        def reset_app_limits(_button):
-            for key, (standard, spin) in limit_controls.items():
-                standard.set_active(APP_LIMITS[key] is None)
-                spin.set_value(APP_LIMITS[key] or 100)
-            message.set_text('サイズ上限をアプリ標準に戻しました。「検査設定を保存」で確定します。')
-        app_limits_reset.connect('clicked', reset_app_limits)
-        limit_page.append(app_limits_reset)
+            limit_controls[key] = spin
         info = Gtk.Label(label='保存先：' + str(self.store.path),
                          xalign=0, wrap=True, selectable=True)
         box.append(info)
@@ -208,8 +194,8 @@ class PreferencesWindow:
             for key, check in controls.items():
                 if key in standards:
                     check.set_active(standards[key])
-            for standard, _spin in limit_controls.values():
-                standard.set_active(True)
+            for key, spin in limit_controls.items():
+                spin.set_value(engine_limits[key])
             message.set_text('表示中の対応項目をClamAV標準値に戻しました。「検査設定を保存」で確定します。')
         reset.connect('clicked', reset_values)
         row.append(reset)
@@ -219,8 +205,7 @@ class PreferencesWindow:
             try:
                 values = {key: control.get_active() for key, control in controls.items()}
                 option_arguments(values, supported)
-                limits = {key: None if standard.get_active() else spin.get_value_as_int()
-                          for key, (standard, spin) in limit_controls.items()}
+                limits = {key: spin.get_value_as_int() for key, spin in limit_controls.items()}
                 limit_arguments(limits, supported)
                 automation = read_automation()
                 validate_automation(automation)
@@ -270,17 +255,15 @@ class PreferencesWindow:
                 supported.update(available)
                 standards.update(defaults)
                 reset.set_sensitive(bool(standards))
-                app_limits_reset.set_sensitive('max-filesize' in supported)
                 state.set_text(status)
                 for option in OPTIONS:
                     controls[option.key].set_sensitive(option.key in supported)
                     if option.key not in supported:
                         controls[option.key].set_label(option.label + '（このClamAVでは非対応）')
-                for key, (standard, spin) in limit_controls.items():
-                    standard.set_sensitive(key in supported)
-                    spin.set_sensitive(key in supported and not standard.get_active())
+                for key, spin in limit_controls.items():
+                    spin.set_sensitive(key in supported)
                     if key not in supported:
-                        standard.set_label('このClamAVでは数値指定に非対応')
+                        spin.set_tooltip_text('このClamAVでは数値指定に非対応です。')
                 save.set_sensitive(True)
                 return False
             GLib.idle_add(finish)
