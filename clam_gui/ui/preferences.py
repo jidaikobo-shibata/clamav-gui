@@ -6,7 +6,7 @@ import shutil
 from gi.repository import GLib, Gtk
 from ..core import engine_status
 from ..jobs import start_worker
-from ..options import OPTIONS, supported_options, standard_defaults, option_arguments, LIMITS, limit_arguments
+from ..options import OPTIONS, supported_options, standard_defaults, option_arguments, LIMITS, APP_LIMITS, limit_arguments
 from ..retention import validate as validate_automation
 from ..background import enabled as background_enabled, heartbeat
 
@@ -167,12 +167,12 @@ class PreferencesWindow:
         pages.append_page(limit_page, Gtk.Label(label='サイズ上限'))
         for key, (label, explanation) in LIMITS.items():
             limit_page.append(Gtk.Label(label=label, xalign=0))
-            limit_page.append(Gtk.Label(label=explanation, xalign=0, wrap=True))
+            limit_page.append(Gtk.Label(label=explanation + (' アプリ標準は256 MiBです。' if key == 'max-filesize' else ' アプリ標準はClamAV標準値です。'), xalign=0, wrap=True))
             row_limits = Gtk.Box(spacing=12)
             standard = Gtk.CheckButton(label='ClamAV標準値を使う', active=limit_values[key] is None)
             standard.update_property([Gtk.AccessibleProperty.LABEL], [label + 'にClamAV標準値を使う'])
             spin = Gtk.SpinButton.new_with_range(1, 2047, 1)
-            spin.set_value(limit_values[key] or 100)
+            spin.set_value(limit_values[key] or APP_LIMITS[key] or 100)
             spin.set_numeric(True)
             spin.update_property([Gtk.AccessibleProperty.LABEL], [label + '（MiB）'])
             spin.set_sensitive(False)
@@ -188,6 +188,14 @@ class PreferencesWindow:
             '標準値を使う場合はClamAVへ数値を指定しません。\n'
             '両方を指定するときは合計上限を1ファイルの上限以上にしてください。\n'
             '上限を超えた対象は検査不完了として報告します。', xalign=0, wrap=True))
+        app_limits_reset = Gtk.Button(label='サイズ上限をアプリ標準に戻す', sensitive=False, halign=Gtk.Align.START)
+        def reset_app_limits(_button):
+            for key, (standard, spin) in limit_controls.items():
+                standard.set_active(APP_LIMITS[key] is None)
+                spin.set_value(APP_LIMITS[key] or 100)
+            message.set_text('サイズ上限をアプリ標準に戻しました。「検査設定を保存」で確定します。')
+        app_limits_reset.connect('clicked', reset_app_limits)
+        limit_page.append(app_limits_reset)
         info = Gtk.Label(label='保存先：' + str(self.store.path),
                          xalign=0, wrap=True, selectable=True)
         box.append(info)
@@ -262,6 +270,7 @@ class PreferencesWindow:
                 supported.update(available)
                 standards.update(defaults)
                 reset.set_sensitive(bool(standards))
+                app_limits_reset.set_sensitive('max-filesize' in supported)
                 state.set_text(status)
                 for option in OPTIONS:
                     controls[option.key].set_sensitive(option.key in supported)

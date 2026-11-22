@@ -74,7 +74,7 @@ class SizeLimitTests(unittest.TestCase):
     def test_defaults_and_atomic_save(self):
         with tempfile.TemporaryDirectory() as root:
             store = Store(root)
-            self.assertEqual(store.scan_limits(), {'max-filesize': None, 'max-scansize': None})
+            self.assertEqual(store.scan_limits(), {'max-filesize': 256, 'max-scansize': None})
             settings = store.scan_options()
             limits = {'max-filesize': 256, 'max-scansize': 512}
             store.set_scan_preferences(settings, limits)
@@ -84,6 +84,20 @@ class SizeLimitTests(unittest.TestCase):
                 store.set_scan_preferences(changed, {'max-filesize': 512, 'max-scansize': 256})
             self.assertEqual(store.scan_options(), settings)
             self.assertEqual(store.scan_limits(), limits)
+
+    def test_saved_engine_default_and_custom_limits_are_preserved(self):
+        for value in (None, 128, 512):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as root:
+                store = Store(root)
+                limits = {'max-filesize': value, 'max-scansize': None}
+                store.set_scan_preferences(store.scan_options(), limits)
+                self.assertEqual(Store(root).scan_limits(), limits)
+
+    def test_app_default_is_explicit_and_logged_separately_from_engine_default(self):
+        from clam_gui.options import APP_LIMITS, limit_arguments, describe_limits
+        self.assertEqual(limit_arguments(APP_LIMITS, {'max-filesize'}), ['--max-filesize=256M'])
+        self.assertIn('256 MiB（アプリ標準）', describe_limits(APP_LIMITS))
+        self.assertIn('ClamAV標準（引数省略）', describe_limits({'max-filesize': None, 'max-scansize': None}))
 
     def test_invalid_values_and_unsupported_limits(self):
         from clam_gui.options import validate_limits, limit_arguments

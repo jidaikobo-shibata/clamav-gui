@@ -19,7 +19,7 @@ from .settings import Preferences
 from .scan_output import ScanOutput
 from .results import ResultKind, ScanStatus, assess, has_detection, warning_signature, summarize, output_was_truncated, detection_uncertain
 from .mailboxes import MAILBOX_NOTE, mailbox_findings, mailbox_guidance
-from .options import DEFAULTS, supported_options, option_arguments, describe_options, LIMITS, validate_limits, limit_arguments, describe_limits
+from .options import DEFAULTS, supported_options, option_arguments, describe_options, LIMITS, APP_LIMITS, validate_limits, limit_arguments, describe_limits
 
 
 def engine_status():
@@ -200,7 +200,7 @@ class Store:
         self.preferences.set('scan-options', settings)
 
     def scan_limits(self):
-        values = self.preferences.get('scan-limits', {key: None for key in LIMITS})
+        values = self.preferences.get('scan-limits', dict(APP_LIMITS))
         validate_limits(values)
         return values
 

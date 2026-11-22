@@ -943,6 +943,13 @@ def check():
         assert all(check.get_active() for check in limit_checks)
         assert app.store.scan_limits()['max-filesize'] == 256
         assert app.store.scan_options()['phishing-sigs']
+        app_reset = next(w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() == 'サイズ上限をアプリ標準に戻す')
+        app_reset.emit('clicked')
+        assert not limit_checks[0].get_active() and limit_checks[1].get_active()
+        assert spins[0].get_value_as_int() == 256
+        assert app.store.scan_limits()['max-scansize'] == 512
+        save.emit('clicked')
+        assert app.store.scan_limits() == {'max-filesize': 256, 'max-scansize': None}
         preferences[0].destroy()
         from clam_gui.packages import PackagePlan, PACKAGES
         class FakePackages:

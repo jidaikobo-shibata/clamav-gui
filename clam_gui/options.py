@@ -84,6 +84,8 @@ LIMITS = {
 }
 
 
+APP_LIMITS = {'max-filesize': 256, 'max-scansize': None}
+
 def validate_limits(limits):
     if set(limits) != set(LIMITS):
         raise ValueError('サイズ上限の項目が不正です。')
@@ -106,5 +108,5 @@ def limit_arguments(limits, supported):
 
 
 def describe_limits(limits):
-    return '\n'.join(label + ': ' + (f'{limits[key]} MiB' if limits[key] is not None else 'ClamAV標準（引数省略）')
+    return '\n'.join(label + ': ' + ((f'{limits[key]} MiB' + ('（アプリ標準）' if limits[key] == APP_LIMITS[key] else '')) if limits[key] is not None else 'ClamAV標準（引数省略）')
                      for key, (label, _) in LIMITS.items())
