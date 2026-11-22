@@ -17,6 +17,41 @@ class BackgroundTests(unittest.TestCase):
         self.run = Mock()
         self.service = BackgroundService(self.store, self.root/'units', self.run)
 
+    def test_global_watch_switch_preserves_plans(self):
+        key = self.store.save_profile(Plan('watch', [str(self.root)], [], kind='watch'))
+        save_schedule(self.store, key, Schedule(enabled=True))
+        values = self.store.automation_settings()
+        values['watch_enabled'] = False
+        self.store.set_automation_settings(values)
+        self.assertEqual(watched_plans(self.store), [])
+        values['watch_enabled'] = True
+        self.store.set_automation_settings(values)
+        self.assertEqual(watched_plans(self.store)[0][0], key)
+
+    def test_reconcile_healthy_service_does_not_restart(self):
+        self.service.apply(True)
+        put_preference(self.store, 'background-state', dict(updated=time.time()))
+        self.run.reset_mock()
+        with patch.object(self.service, 'supported', return_value=True):
+            self.service.reconcile()
+        self.run.assert_not_called()
+
+    def test_reconcile_disable_does_not_stop_running_scan(self):
+        self.service.apply(True)
+        values = self.store.automation_settings()
+        values.update(watch_enabled=False, media_enabled=False)
+        self.store.set_automation_settings(values)
+        self.run.reset_mock()
+        with patch.object(self.service, 'supported', return_value=True):
+            self.service.reconcile()
+        self.assertFalse(enabled(self.store))
+        self.run.assert_called_once_with('disable', self.service.name)
+
+    def test_reconcile_defers_restart_during_scan(self):
+        with patch.object(self.service, 'supported', return_value=True), patch('clam_gui.runtime.activities', return_value=[object()]):
+            self.assertIn('終わってから', self.service.reconcile())
+        self.run.assert_not_called()
+
     def test_lease_excludes_second_owner_and_can_transfer(self):
         first, second = Lease(self.store), Lease(self.store)
         self.addCleanup(first.close); self.addCleanup(second.close)
@@ -94,6 +129,35 @@ except ImportError:
 @unittest.skipUnless(HAS_GIO,'GIO is not installed')
 class CheckpointTests(unittest.TestCase):
     setUp = BackgroundTests.setUp
+    def test_disabled_monitor_drains_without_cancelling_active_scan(self):
+        monitor = Monitor(self.store, observers=lambda _: Mock(), notifier=lambda *args: None)
+        self.addCleanup(monitor.shutdown)
+        monitor.engine = Mock(active=True)
+        monitor.loop = Mock()
+        self.assertTrue(monitor.tick())
+        monitor.engine.configure.assert_called_once_with([], False)
+        monitor.engine.close.assert_not_called()
+        monitor.loop.quit.assert_not_called()
+        monitor.engine.active = False
+        self.assertFalse(monitor.tick())
+        monitor.loop.quit.assert_called_once()
+
+    def test_code_update_waits_for_active_scan(self):
+        monitor = Monitor(self.store, observers=lambda _: Mock(), notifier=lambda *args: None)
+        self.addCleanup(monitor.shutdown)
+        put_preference(self.store, 'background-enabled', True)
+        monitor.last_revision_check = float('-inf')
+        monitor.engine = Mock(active=True)
+        monitor.loop = Mock()
+        with patch('clam_gui.monitor.monitor_revision', return_value='updated'), patch.object(monitor.lease, 'acquire', return_value=False):
+            self.assertTrue(monitor.tick())
+            self.assertFalse(monitor.reload_requested)
+            monitor.engine.active = False
+            monitor.last_revision_check = float('-inf')
+            self.assertFalse(monitor.tick())
+        self.assertTrue(monitor.reload_requested)
+        monitor.engine.close.assert_not_called()
+
     def test_first_baseline_then_changes_while_stopped_and_scanned_checkpoint(self):
         folder=self.root/'folder';folder.mkdir()
         file=folder/'file';file.write_text('first')

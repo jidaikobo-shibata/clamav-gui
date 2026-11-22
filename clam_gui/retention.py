@@ -2,14 +2,14 @@
 import datetime
 from .results import assess
 
-DEFAULTS = dict(media_enabled=False, retention_enabled=False, retention_days=90,
+DEFAULTS = dict(watch_enabled=True, media_enabled=False, retention_enabled=False, retention_days=90,
                 alert_days=365, max_mib=256, max_records=10000)
 
 
 def validate(values):
     if set(values) != set(DEFAULTS):
         raise ValueError('監視・履歴設定の項目が不正です。')
-    for key in ('media_enabled', 'retention_enabled'):
+    for key in ('watch_enabled', 'media_enabled', 'retention_enabled'):
         if type(values[key]) is not bool:
             raise ValueError('監視・履歴設定のオン・オフが不正です。')
     for key, minimum, maximum in [('retention_days', 1, 3650), ('alert_days', 1, 3650),

@@ -8,7 +8,7 @@ import sqlite3
 import time
 from .platforms import get_backend
 from .automation import Automation, MEDIA_ID, signature, SIGNATURE_VERSION
-from .background import Lease, watched_plans, preference, put_preference
+from .background import Lease, watched_plans, preference, put_preference, monitor_revision
 from gi.repository import GLib
 
 
@@ -122,6 +122,10 @@ class Monitor:
         self.notices, self.command = AutomaticNotices(), None
         self.timer = None
         self.stopping = False
+        self.draining = False
+        self.code_revision = monitor_revision()
+        self.last_revision_check = time.monotonic()
+        self.reload_requested = False
         self.failure = None
         self.last_tick = time.time()
         self.started = False
@@ -212,11 +216,22 @@ class Monitor:
             self.command_value = controls.get('background-command', {})
             self.last_control = now
         if self.stopping or not self.control:
-            self.stop()
+            if self.stopping:
+                self.stop()
+            elif not self.draining:
+                self.observers.close()
+                self.engine.configure([], False)
+                self.draining = True
             if not self.engine.active:
                 self.loop.quit()
                 return False
             return True
+        if now-self.last_revision_check >= 30:
+            self.last_revision_check = now
+            if monitor_revision() != self.code_revision and not self.engine.active:
+                self.reload_requested = True
+                self.loop.quit()
+                return False
         if not self.lease.acquire():
             self.last_control = float('-inf')
             return True  # GUI finishes any scan before yielding monitoring ownership.
@@ -359,5 +374,7 @@ class Monitor:
                     self.timer = None
             finally:
                 self.shutdown()
+        if self.reload_requested:
+            raise SystemExit(75)  # systemd Restart=on-failure reloads updated code.
         if self.failure:
             raise RuntimeError('常駐監視でエラーが発生しました。') from self.failure

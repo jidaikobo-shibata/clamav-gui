@@ -22,6 +22,7 @@ from clam_gui.core import Plan
 from clam_gui.mailboxes import MAILBOX_NOTE, mailbox_guidance
 from unittest.mock import patch
 from clam_gui.definitions import AutoUpdateState
+patch('clam_gui.background.BackgroundService.reconcile', return_value='自動検査：テスト環境').start()
 auto_patch = patch('clam_gui.definitions.AutoUpdateService')
 auto_service = auto_patch.start()
 patch('clam_gui.packages.AptManager.engine_update_status', return_value=('ClamAV本体（APT） test：更新なし（APT情報）', 'test')).start()
@@ -883,7 +884,7 @@ def check():
     assert len(preferences) == 1
     widgets = list(descendants(preferences[0]))
     checks = [w for w in widgets if isinstance(w, Gtk.CheckButton)]
-    assert len(checks) == 22
+    assert len(checks) == 23
     phishing = next(w for w in checks if w.get_label() == 'メールのフィッシング検査')
     assert not phishing.get_active()
     phishing.set_active(True)
@@ -892,40 +893,9 @@ def check():
         save = next(w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() == '検査設定を保存')
         if not save.get_sensitive():
             return True
-        from clam_gui.background import put_preference, enabled as background_enabled
-        background = next(w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() == '常駐監視を有効にする…')
-        with patch('clam_gui.background.BackgroundService.apply') as apply:
-            background.emit('clicked')
-            dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
-            assert 'ユーザーサービス' in dialog.get_property('secondary-text')
-            dialog.response(Gtk.ResponseType.CANCEL)
-            apply.assert_not_called()
-            assert not background_enabled(app.store)
-            def apply_mock(enable):
-                put_preference(app.store, 'background-enabled', enable)
-            apply.side_effect = apply_mock
-            background.emit('clicked')
-            dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
-            dialog.response(Gtk.ResponseType.OK)
-            wait_until(lambda: not app.schedule_busy)
-            apply.assert_called_once_with(True)
-            assert background_enabled(app.store)
-            app.configure_automation()
-            assert not app.monitor_lease.file and not app.observers.monitors
-            assert '接続できません' in app.monitor_status('watch')
-            put_preference(app.store, 'background-state', dict(updated=time.time(), statuses={'watch':'service watching'}))
-            assert app.monitor_status('watch') == 'service watching'
-            assert not app.on_close(None)  # Service jobs do not keep the GUI open.
-            from clam_gui.automation import MEDIA_ID
-            settings = app.store.automation_settings();settings['media_enabled'] = True
-            app.store.set_automation_settings(settings);app.refresh_profiles()
-            with patch.object(app.observers,'scan_connected') as local_media:
-                app.plan_action(MEDIA_ID,'run')
-                local_media.assert_not_called()
-            put_preference(app.store, 'background-enabled', False)
-            app.configure_automation()
-            assert app.monitor_lease.file
-            settings['media_enabled'] = False;app.store.set_automation_settings(settings);app.refresh_profiles()
+        assert any(w.get_label() == 'フォルダー監視を実施する' for w in checks)
+        assert not any(isinstance(w, Gtk.Button) and '常駐監視' in (w.get_label() or '') for w in widgets)
+        assert any(isinstance(w, Gtk.Label) and 'ログアウト中は停止' in w.get_text() for w in widgets)
         spins = [w for w in widgets if isinstance(w, Gtk.SpinButton) and w.get_parent().get_first_child() == w]
         assert len(spins) == 2
         assert [spin.get_value_as_int() for spin in spins] == [256, 256]

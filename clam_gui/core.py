@@ -213,6 +213,7 @@ class Store:
             if automation is not None:
                 validate_automation(automation)
                 entries.append(('automation', automation))
+                entries.append(('monitor-managed', True))
             self.preferences.set_many(dict(entries), db)
             if automation is not None:
                 prune(db, automation)

@@ -25,6 +25,8 @@ def enabled(store):
 def watched_plans(store):
     from .watch_scope import safe_watch_plan
     plans = []
+    if not store.automation_settings()['watch_enabled']:
+        return plans
     schedules = read_schedules(store)
     for key, plan in store.profiles():
         if plan.kind != 'watch' or not (schedules.get(key) and schedules[key].enabled) or plan.requires_admin:
@@ -89,7 +91,7 @@ class BackgroundService:
         runner = Path(__file__).resolve().parents[1]/'scripts/run_monitor.py'
         args = ['/usr/bin/python3', str(runner), '--data-dir', str(self.store.path.parent)]
         return (MARKER + '[Unit]\nDescription=ClamAV GUI session monitoring\n'
-                'PartOf=graphical-session.target\nAfter=graphical-session-pre.target\n\n'
+                'PartOf=graphical-session.target\nAfter=graphical-session-pre.target\nStartLimitIntervalSec=300\nStartLimitBurst=5\n\n'
                 '[Service]\nType=simple\nExecStart=' + ' '.join(map(quote, args)) +
                 '\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=40\nUMask=0077\nNice=10\nIOSchedulingClass=best-effort\nIOSchedulingPriority=7\nCPUWeight=20\nIOWeight=20\n'
                 '\n[Install]\nWantedBy=graphical-session.target\n')
@@ -130,3 +132,48 @@ class BackgroundService:
             except Exception as recovery:
                 raise RuntimeError('サービス設定の復元も完了できませんでした。環境設定で状態を確認してください：' + str(recovery)) from error
             raise
+
+    def reconcile(self):
+        """Maintain a managed service without disrupting scans on normal changes."""
+        from .runtime import activities
+        want = requested(self.store)
+        if self.path.is_symlink():
+            raise ValueError('サービス設定がリンクのため変更できません。')
+        old = self.path.read_text() if self.path.exists() else None
+        if old is not None and not old.startswith(MARKER):
+            raise ValueError('アプリ以外が作成したサービス設定は変更しません。')
+        if not self.supported():
+            raise ValueError('この環境では画面を閉じたままの自動検査に対応していません。')
+        if not want:
+            # Let the monitor stop accepting work and finish its current scan.
+            put_preference(self.store, 'background-enabled', False)
+            if old is not None:
+                self.run('disable', self.name)
+            return '自動検査は無効です。実行中の検査があれば完了後に終了します。'
+        state = heartbeat(self.store)
+        if old == self.unit() and enabled(self.store) and state:
+            return '自動検査：稼働中（ログイン中）'
+        if activities(self.store) or state.get('active'):
+            return '自動検査：実行中の検査が終わってから起動・更新します。'
+        self.apply(True)
+        return '自動検査を起動しました。状態を確認しています…'
+
+
+def managed(store):
+    return preference(store, 'monitor-managed', False) is True
+
+
+def requested(store):
+    values = store.automation_settings()
+    return values['watch_enabled'] or values['media_enabled']
+
+
+def monitor_revision():
+    base = Path(__file__).parent
+    digest = hashlib.sha256()
+    for path in sorted(base.rglob('*.py')):
+        if 'ui' in path.relative_to(base).parts or path.name == '__main__.py':
+            continue
+        digest.update(str(path.relative_to(base)).encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()

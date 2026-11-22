@@ -3,6 +3,7 @@ from .notifications import AutomaticNotices
 from dataclasses import replace
 import threading
 import shutil
+import time
 import gi
 
 gi.require_version('Gtk', '4.0')
@@ -12,7 +13,7 @@ from .jobs import execute_scan, start_worker
 from .execution import ScanAlreadyQueued
 from .schedule import Schedule, read_schedule, read_schedules
 from .automation import Automation, MEDIA_ID, media_plan
-from .background import Lease, enabled as background_enabled, heartbeat, request_media, watched_plans
+from .background import Lease, enabled as background_enabled, heartbeat, request_media, watched_plans, managed, requested
 from .platforms import get_backend
 from .runtime import activities, request_stop
 
@@ -306,6 +307,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         self.poll_plans()
 
     def poll_plans(self):
+        self.reconcile_background()
         background = background_enabled(self.store)
         remote = heartbeat(self.store) if background else {}
         if background:
@@ -493,10 +495,40 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         self.notice.set_text(text)
         self.notice.set_visible(bool(text))
 
+    def reconcile_background(self, force=False):
+        if not managed(self.store):
+            return
+        desired = requested(self.store)
+        now = time.monotonic()
+        changed = desired != getattr(self, 'background_desired', None)
+        if getattr(self, 'background_checking', False):
+            return
+        if not force and not changed and now < getattr(self, 'background_next_check', 0):
+            return
+        self.background_desired = desired
+        self.background_checking = True
+        self.background_next_check = now + 30
+        def finish(message, error=False):
+            self.background_checking = False
+            self.background_status = message
+            failures = getattr(self, 'background_failures', 0) + 1 if error else 0
+            self.background_failures = failures
+            self.background_next_check = time.monotonic() + min(300, 30 * 2 ** min(failures, 4))
+            self.configure_automation()
+            return False
+        def worker():
+            try:
+                result = self.backend.background(self.store).reconcile()
+            except Exception as error:
+                GLib.idle_add(finish, '自動検査を開始・更新できませんでした：' + str(error), True)
+            else:
+                GLib.idle_add(finish, result)
+        start_worker(worker, lambda error: finish('自動検査の設定を反映できませんでした：' + str(error), True))
+
     def configure_automation(self):
         if not hasattr(self, 'automation'):
             return
-        if background_enabled(self.store):
+        if managed(self.store) or background_enabled(self.store):
             # Yield all observation to the service; a current scan is allowed to finish.
             self.observers.configure([])
             self.automation.configure([], False)
@@ -512,19 +544,23 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         self.observers.configure(watches)
 
     def monitor_status(self, key, background=None, remote=None):
+        if key != MEDIA_ID and not self.store.automation_settings()['watch_enabled']:
+            return 'フォルダー監視は環境設定で無効になっています'
         background = background_enabled(self.store) if background is None else background
         if background:
             state = heartbeat(self.store) if remote is None else remote
             if not state:
                 return '常駐監視に接続できません。環境設定で確認してください。'
             return state.get('statuses', {}).get(key, '常駐監視へ設定を反映中…').replace('アプリ起動中のみ', 'ログイン中')
+        if managed(self.store):
+            return getattr(self, 'background_status', '自動検査へ設定を反映中…')
         if not self.monitor_lease.file:
             return '別のプロセスが監視しています'
         return self.automation.status(key)
 
     def tick_automation(self):
         self.configure_automation()
-        if not background_enabled(self.store) and self.monitor_lease.file:
+        if not managed(self.store) and not background_enabled(self.store) and self.monitor_lease.file:
             self.automation.tick(blocked=self.schedule_busy or (self.busy and not self.manual_jobs))
         return True
 
