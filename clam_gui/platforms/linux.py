@@ -94,10 +94,8 @@ class LinuxBackend:
             return None
 
     def notify(self, title, body, urgency='normal'):
-        result = subprocess.run(['notify-send', '--app-name=ClamAV GUI', '--urgency='+urgency,
-                                 '--expire-time=0', title, body], capture_output=True, timeout=10)
-        if result.returncode:
-            raise RuntimeError('デスクトップ通知を送れませんでした。履歴を確認してください。')
+        from ..desktop_notifications import send
+        send(title, body, urgency)
 
     def install_stop_handlers(self, callback):
         import signal

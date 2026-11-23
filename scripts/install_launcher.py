@@ -33,7 +33,7 @@ def render_entry(source, python='/usr/bin/python3'):
              'Comment[ja]=ClamAVでフォルダーを検査し、結果を確認します\n'
              'Exec=' + ' '.join(exec_arg(arg) for arg in args) + '\n'
              'Icon=' + desktop_string(project/'assets/clamav-gui.svg') + '\n'
-             'Terminal=false\nStartupNotify=true\nCategories=Utility;Security;\n'
+             'Terminal=false\nStartupNotify=true\nX-GNOME-UsesNotifications=true\nCategories=Utility;Security;\n'
              'Keywords=ClamAV;antivirus;scan;\nStartupWMClass=' + app_id + '\n')
     return app_id + '.desktop', entry
 

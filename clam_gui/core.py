@@ -204,6 +204,11 @@ class Store:
         validate_limits(values)
         return values
 
+    def effective_limits(self, plan):
+        limits = self.scan_limits() if plan.limits is None else dict(plan.limits)
+        validate_limits(limits)
+        return limits
+
     def set_scan_preferences(self, settings, limits, automation=None):
         if set(settings) != set(DEFAULTS) or any(type(value) is not bool for value in settings.values()):
             raise ValueError('検査設定が不正です。')
@@ -279,7 +284,7 @@ class Store:
                                excludes=[str(p) for p in plan.excludes],
                                excluded_dirs=[str(p) for p in plan.excluded_dirs],
                                phishing=plan.phishing, requires_admin=plan.requires_admin,
-                               kind=plan.kind, watch_recursive=plan.watch_recursive))
+                               kind=plan.kind, watch_recursive=plan.watch_recursive, limits=plan.limits))
         with self.connect() as db:
             db.execute('INSERT INTO profiles VALUES (?, ?, ?) '
                        'ON CONFLICT(id) DO UPDATE SET name=excluded.name, data=excluded.data',
@@ -415,6 +420,7 @@ class Plan:
     requires_admin: bool = False
     kind: str = 'scheduled'
     watch_recursive: bool = True
+    limits: dict | None = None
 
     def describe(self, include_policy=True):
         lines = [self.label, '対象:'] + [str(p) for p in self.targets]
@@ -434,6 +440,10 @@ class Plan:
 
 
 def validate_profile(plan):
+    if plan.limits is not None:
+        if not isinstance(plan.limits, dict):
+            raise ValueError('サイズ上限の設定が不正です。')
+        validate_limits(plan.limits)
     if plan.kind not in ('scheduled', 'watch', 'media') or type(plan.watch_recursive) is not bool:
         raise ValueError('検査プランの種類・監視範囲が不正です。')
     if not plan.label.strip():
@@ -539,7 +549,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             running.started(started)
             settings = store.scan_options()
             supported = supported_options(binary)
-            limits = store.scan_limits()
+            limits = store.effective_limits(plan)
             arguments = option_arguments(settings, supported) + limit_arguments(limits, supported)
             command = [binary, '--recursive', '--suppress-ok-results',
                        '--follow-file-symlinks=0', '--follow-dir-symlinks=0',

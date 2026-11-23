@@ -48,6 +48,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
 
     def do_activate(self):
         if self.get_active_window():
+            self.get_active_window().unminimize()
             self.get_active_window().present()
             return
         window = Gtk.ApplicationWindow(application=self, title='ClamAV GUI — 開発版')

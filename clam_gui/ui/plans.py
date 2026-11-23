@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 from gi.repository import GLib, Gtk
 from ..core import Plan
+from ..options import LIMITS, APP_LIMITS
 from ..known_locations import trash_folder, location_label
 from ..plan_exclusions import exclusion_state
 from ..jobs import start_worker
@@ -194,6 +195,25 @@ class PlanEditor:
         editor.connect('close-request', lambda _: state['running'])
         error_label = Gtk.Label(xalign=0, wrap=True, selectable=True)
         box.append(error_label)
+        inherited = Gtk.CheckButton(label='環境設定のサイズ上限を使う', active=plan.limits is None)
+        box.append(inherited)
+        limit_fields = {}
+        selected_limits = self.store.effective_limits(plan)
+        for limit_key, (title, _) in LIMITS.items():
+            row = Gtk.Box(spacing=8)
+            row.append(Gtk.Label(label=title, xalign=0, hexpand=True))
+            spin = Gtk.SpinButton.new_with_range(1, 2047, 1)
+            spin.set_value(selected_limits[limit_key] or APP_LIMITS[limit_key])
+            spin.update_property([Gtk.AccessibleProperty.LABEL], [title])
+            row.append(spin)
+            row.append(Gtk.Label(label='MiB'))
+            limit_fields[limit_key] = spin
+            box.append(row)
+        def update_limits(*_):
+            for spin in limit_fields.values():
+                spin.set_sensitive(not inherited.get_active())
+        inherited.connect('toggled', update_limits)
+        update_limits()
         save = Gtk.Button(label='検査プランを保存')
         save.add_css_class('suggested-action')
         def save_profile(_button):
@@ -205,7 +225,8 @@ class PlanEditor:
                 new = Plan(name.get_text().strip(), [root.get_text()],
                            [p for p, directory in exclusions if not directory], plan.phishing,
                            [p for p, directory in exclusions if directory], plan.requires_admin,
-                           'watch' if kind.get_selected() == 1 else 'scheduled', recursive.get_active())
+                           'watch' if kind.get_selected() == 1 else 'scheduled', recursive.get_active(),
+                           None if inherited.get_active() else {k: v.get_value_as_int() for k, v in limit_fields.items()})
                 validate_profile(new)
                 schedule = (replace(saved_schedule, enabled=watch_enabled.get_active())
                             if new.kind == 'watch' else read_fields())

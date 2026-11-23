@@ -470,6 +470,16 @@ def check():
     app.edit_profile(trash_key, dict(app.store.profiles())[trash_key])
     editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
     assert any(w.get_text() == 'フォルダー: ごみ箱' for w in descendants(editor) if isinstance(w, Gtk.Label))
+    inherited = next(w for w in descendants(editor) if isinstance(w, Gtk.CheckButton) and w.get_label() == '環境設定のサイズ上限を使う')
+    limits = [w for w in descendants(editor) if isinstance(w, Gtk.SpinButton) and w.get_accessible_role() == Gtk.AccessibleRole.SPIN_BUTTON and isinstance(w.get_parent().get_last_child(), Gtk.Label) and w.get_parent().get_last_child().get_text() == 'MiB']
+    assert inherited.get_active() and len(limits) == 2
+    assert all(not w.get_sensitive() for w in limits)
+    inherited.set_active(False)
+    assert all(w.get_sensitive() for w in limits)
+    limits[0].set_value(512)
+    limits[1].set_value(1024)
+    next(w for w in descendants(editor) if isinstance(w, Gtk.Button) and w.get_label() == '検査プランを保存').emit('clicked')
+    assert dict(app.store.profiles())[trash_key].limits == {'max-filesize': 512, 'max-scansize': 1024}
     editor.destroy()
     app.store.delete_profile(trash_key)
     with app.store.connect() as db:
@@ -477,6 +487,10 @@ def check():
     app.refresh_profiles(key)
     settle_history()
     assert not app.window.get_modal()
+    with patch.object(app.window, 'unminimize') as restore, patch.object(app.window, 'present') as present:
+        app.activate()
+        restore.assert_called_once()
+        present.assert_called_once()
     assert app.main_panes.get_parent() == app.window.get_child()
     app.show_notice('')
     assert not app.notice.get_visible()

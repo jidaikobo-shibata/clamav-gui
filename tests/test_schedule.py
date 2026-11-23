@@ -96,11 +96,10 @@ class ScheduledRunnerTests(unittest.TestCase):
             save_schedule(store, key, Schedule(True))
             with patch('sys.argv', ['runner', '--data-dir', root, '--profile', key]), \
                  patch('scripts.run_scheduled.scan', side_effect=ValueError('別の検査が実行中です')), \
-                 patch('scripts.run_scheduled.subprocess.run') as notify:
+                 patch('clam_gui.platforms.linux.LinuxBackend.notify') as notify:
                 self.assertEqual(main(), 2)
                 notify.assert_called_once()
-                self.assertIn('--expire-time=0', notify.call_args.args[0])
-                self.assertIn('--urgency=critical', notify.call_args.args[0])
+                self.assertEqual(notify.call_args.args[2], 'critical')
             self.assertIn('別の検査', store.recent()[0][2])
 
 
