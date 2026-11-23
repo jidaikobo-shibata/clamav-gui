@@ -16,6 +16,38 @@ class ScheduleTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 schedule.calendar()
 
+    def test_multiple_weekdays_calendar_and_description(self):
+        schedule = Schedule(True, 'weekly', 2, 0, weekdays=[3, 0, 3])
+        self.assertEqual(schedule.calendar(), 'Mon,Thu *-*-* 02:00:00')
+        self.assertIn('毎週月・木曜日', schedule.describe())
+        for days in ([], [7], [-1], [True], ['Mon'], 'Mon'):
+            with self.subTest(days=days), self.assertRaises(ValueError):
+                Schedule(frequency='weekly', weekdays=days).calendar()
+
+    def test_multiple_weekdays_persist_and_duplicate(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            key = store.save_profile(Plan('test', [root], []))
+            manager = Scheduler(store, Path(root)/'units', lambda *_: None)
+            schedule = Schedule(True, 'weekly', 2, 0, weekdays=[1, 4])
+            manager.apply(key, schedule)
+            self.assertIn('OnCalendar=Tue,Fri *-*-* 02:00:00', manager.paths(key)[1].read_text())
+            self.assertEqual(read_schedule(Store(root), key), schedule)
+            copy = store.duplicate_profile(key)
+            self.assertEqual(read_schedule(store, copy).weekdays, [1, 4])
+            self.assertFalse(read_schedule(store, copy).enabled)
+
+    def test_legacy_single_weekday_is_preserved(self):
+        import json
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(root)
+            with store.connect() as db:
+                db.execute('INSERT INTO schedules VALUES (?, ?)', ('legacy', json.dumps(dict(enabled=True, frequency='weekly', weekday=4))))
+            schedule = read_schedule(store, 'legacy')
+            self.assertIsNone(schedule.weekdays)
+            self.assertEqual(schedule.selected_weekdays(), [4])
+            self.assertEqual(schedule.calendar(), 'Fri *-*-* 10:00:00')
+
     def test_apply_disable_and_safe_units(self):
         with tempfile.TemporaryDirectory(prefix='clam schedule ') as root:
             store = Store(Path(root)/'data')
@@ -68,7 +100,7 @@ class ScheduleTests(unittest.TestCase):
                 manager.apply(admin, Schedule(True))
 
     def test_systemd_accepts_calendar(self):
-        for schedule in [Schedule(True), Schedule(True, 'weekly'), Schedule(True, 'monthly')]:
+        for schedule in [Schedule(True), Schedule(True, 'weekly'), Schedule(True, 'weekly', weekdays=[0, 3]), Schedule(True, 'weekly', weekdays=list(range(7))), Schedule(True, 'monthly')]:
             result = subprocess.run(['systemd-analyze', 'calendar', schedule.calendar()],
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)

@@ -326,8 +326,14 @@ class PlanEditor:
         hour.set_value(saved.hour)
         minute = field('分（0〜59）', Gtk.SpinButton.new_with_range(0, 59, 1))
         minute.set_value(saved.minute)
-        weekday = field('曜日', Gtk.DropDown.new_from_strings(['月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日', '日曜日']))
-        weekday.set_selected(saved.weekday)
+        weekday = field('曜日', Gtk.Box(spacing=8))
+        selected_days = saved.selected_weekdays()
+        day_checks = []
+        for day, name in enumerate('月火水木金土日'):
+            check = Gtk.CheckButton(label=name, active=day in selected_days)
+            check.update_property([Gtk.AccessibleProperty.LABEL], [name + '曜日'])
+            weekday.append(check)
+            day_checks.append(check)
         monthday = field('日付（毎月1〜28日）', Gtk.SpinButton.new_with_range(1, 28, 1))
         monthday.set_value(saved.monthday)
         interval = field('間隔（1〜1440分）', Gtk.SpinButton.new_with_range(1, 1440, 1))
@@ -352,7 +358,11 @@ class PlanEditor:
         frequency.connect('notify::selected', frequency_changed)
         frequency_changed()
         def read():
+            days = [day for day, check in enumerate(day_checks) if check.get_active()]
+            stored_days = None if saved.weekdays is None and days == [saved.weekday] else days
             return Schedule(enabled.get_active(), ['daily', 'weekly', 'monthly', 'hourly', 'interval'][frequency.get_selected()],
                             hour.get_value_as_int(), minute.get_value_as_int(),
-                            weekday.get_selected(), monthday.get_value_as_int(), interval.get_value_as_int())
+                            next((day for day, check in enumerate(day_checks) if check.get_active()), saved.weekday),
+                            monthday.get_value_as_int(), interval.get_value_as_int(),
+                            stored_days)
         return read

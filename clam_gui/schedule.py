@@ -20,6 +20,15 @@ class Schedule:
     weekday: int = 0
     monthday: int = 1
     interval_minutes: int = 5
+    weekdays: list | None = None
+
+    def selected_weekdays(self):
+        days = [self.weekday] if self.weekdays is None else self.weekdays
+        if not isinstance(days, list) or any(type(day) is not int or not 0 <= day <= 6 for day in days):
+            raise ValueError('曜日の設定が不正です。')
+        if self.frequency == 'weekly' and not days:
+            raise ValueError('毎週の検査は曜日を1つ以上選択してください。')
+        return sorted(set(days))
 
     def calendar(self):
         if self.frequency not in ('daily', 'weekly', 'monthly', 'hourly', 'interval'):
@@ -30,13 +39,14 @@ class Schedule:
             raise ValueError('曜日・日付を確認してください。毎月の日付は1〜28日です。')
         if type(self.interval_minutes) is not int or not 1 <= self.interval_minutes <= 1440:
             raise ValueError('間隔は1〜1440分で指定してください。')
+        days = self.selected_weekdays()
         if self.frequency == 'interval':
             return None
         if self.frequency == 'hourly':
             return f'*-*-* *:{self.minute:02}:00'
         time = f'{self.hour:02}:{self.minute:02}:00'
         if self.frequency == 'weekly':
-            return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][self.weekday] + ' *-*-* ' + time
+            return ','.join(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][day] for day in days) + ' *-*-* ' + time
         if self.frequency == 'monthly':
             return f'*-*-{self.monthday:02} ' + time
         return '*-*-* ' + time
@@ -49,7 +59,7 @@ class Schedule:
             return f'定期検査：完了から{self.interval_minutes}分後に繰り返し（初回は登録から{self.interval_minutes}分後）'
         if self.frequency == 'hourly':
             return f'定期検査：毎時{self.minute:02}分（端末の現地時刻）'
-        frequency = {'daily': '毎日', 'weekly': '毎週' + '月火水木金土日'[self.weekday] + '曜日',
+        frequency = {'daily': '毎日', 'weekly': '毎週' + '・'.join('月火水木金土日'[day] for day in self.selected_weekdays()) + '曜日',
                      'monthly': f'毎月{self.monthday}日'}[self.frequency]
         return f'定期検査：{frequency} {self.hour:02}:{self.minute:02}（端末の現地時刻）'
 

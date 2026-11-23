@@ -893,6 +893,31 @@ def check():
         assert next(w for w in fields if isinstance(w, Gtk.CheckButton)).get_active()
         next(w for w in fields if isinstance(w, Gtk.Button) and w.get_label() == '検査プランを保存').emit('clicked')
         manager.return_value.apply.assert_not_called()
+        app.edit_profile(new_key, dict(app.store.profiles())[new_key])
+        editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+        fields = list(descendants(editor))
+        frequency = next(w for w in fields if isinstance(w, Gtk.DropDown) and w.get_model().get_n_items() == 5)
+        frequency.set_selected(1)
+        days = [w for w in fields if isinstance(w, Gtk.CheckButton) and w.get_label() in list('月火水木金土日')]
+        assert len(days) == 7 and days[0].get_active()
+        assert days[0].get_parent().get_parent().get_visible()
+        for day in days:
+            day.set_active(False)
+        save = next(w for w in fields if isinstance(w, Gtk.Button) and w.get_label() == '検査プランを保存')
+        save.emit('clicked')
+        manager.return_value.apply.assert_not_called()
+        assert any(isinstance(w, Gtk.Label) and '曜日を1つ以上' in w.get_text() for w in fields)
+        days[0].set_active(True)
+        days[3].set_active(True)
+        save.emit('clicked')
+        confirmation(Gtk.ResponseType.OK)
+        settle()
+        assert read_schedule(app.store, new_key).weekdays == [0, 3]
+        app.edit_profile(new_key, dict(app.store.profiles())[new_key])
+        editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+        days = [w for w in descendants(editor) if isinstance(w, Gtk.CheckButton) and w.get_label() in list('月火水木金土日')]
+        assert [i for i, w in enumerate(days) if w.get_active()] == [0, 3]
+        editor.destroy()
     app.preferences()
     preferences = [w for w in Gtk.Window.list_toplevels() if w.get_title() == '環境設定']
     assert len(preferences) == 1
