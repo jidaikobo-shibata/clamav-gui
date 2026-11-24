@@ -506,20 +506,25 @@ def storage_warning(status, output, error):
             output + '\n履歴保存エラー：' + str(error))
 
 
-def persist_result(store, plan, started, status, output, profile_id):
+def persist_result(store, plan, started, status, output, profile_id, *, administrator=False):
     try:
-        store.save(started, plan.describe(), status, output, profile_id)
+        description = plan.describe()
+        if administrator:
+            description = replace(plan, requires_admin=False).describe().replace('通常ユーザーで検査します。', '管理者権限による手動検査です。')
+        store.save(started, description, status, output, profile_id)
     except Exception as error:
         return storage_warning(status, output, error)
     return status, output
 
 
-def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None, available=None, wait=False, can_start=None):
+def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None, available=None, wait=False, can_start=None, administrator=False):
     plan = target if isinstance(target, Plan) else Plan('フォルダー検査', [Path(target).absolute()], [])
     plan = store.effective_plan(plan)
     cancel = cancel if cancel is not None else threading.Event()
-    if plan.requires_admin:
+    if plan.requires_admin and not administrator:
         raise ValueError('このプランには管理者権限用の旧設定が残っています。編集画面で「通常ユーザーで検査する」を選んで保存してください。')
+    if administrator and (files is not None or plan.kind == 'media' or get_backend().name != 'linux'):
+        raise ValueError('管理者検査はUbuntuの手動フォルダー全体検査だけで利用できます。')
     if available is not None and not available():
         raise ValueError('検査対象のメディアが取り外されました。')
     validate_profile(plan)
@@ -582,8 +587,12 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             with ScanOutput() as log:
                 process = None
                 try:
-                    process = get_backend().spawn_scanner(command, lock=lock, stdout=log, stderr=subprocess.STDOUT,
-                                               env={**os.environ, 'LC_ALL': 'C'})
+                    if administrator:
+                        from .admin_scan import spawn
+                        process = spawn(plan, {k: v for k, v in settings.items() if k in supported}, limits, stdout=log, stderr=subprocess.STDOUT)
+                    else:
+                        process = get_backend().spawn_scanner(command, lock=lock, stdout=log, stderr=subprocess.STDOUT,
+                                                   env={**os.environ, 'LC_ALL': 'C'})
                     cancelled = False
                     removed = False
                     while True:
@@ -602,6 +611,15 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                                     code = process.wait()
                                 break
                     output = log.finish()
+                    if administrator:
+                        if code in (0, 1) and 'SCAN SUMMARY' not in output:
+                            code = 2
+                            output += '\n隔離環境の起動または検査に失敗し、ClamAVの集計結果が返りませんでした。'
+                        cancelled = cancelled or code in (126, 130)
+                        if code == 126:
+                            output += '\n管理者認証がキャンセルされたか、許可されませんでした。'
+                        elif code == 127:
+                            output += '\n管理者認証または補助プログラムの起動に失敗しました。'
                     status = summarize(code, output, cancelled)
                     if log.detected and not status.assessment.detected:
                         status = ScanStatus(str(status), status.assessment.kind, True)
@@ -624,6 +642,9 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                             pass
                     output = log.finish() + '\nClamAVの実行エラー：' + str(error)
                     status = ScanStatus('検査不完了：ClamAVを実行できませんでした', ResultKind.INCOMPLETE, log.detected)
+            if administrator:
+                output = ('実行方法：管理者権限による手動検査\n'
+                          '/proc・/sys・/dev・/runと対象配下の別ファイルシステムは検査しません。\n\n') + output
             findings = mailbox_findings(output, plan.targets)
             if findings:
                 status += f'\n{MAILBOX_NOTE}（検出された保存ファイル：{len(findings)}件）'
@@ -636,7 +657,8 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             result = assess(status, output)
             status = ScanStatus(str(status), result.kind, result.detected, started_at=started)
             result_ready = True
-            status, output = persist_result(store, plan, started, status, output, profile_id)
+            status, output = persist_result(store, plan, started, status, output, profile_id,
+                                            **({'administrator': True} if administrator else {}))
             return status, output
     except sqlite3.Error as error:
         if not result_ready:

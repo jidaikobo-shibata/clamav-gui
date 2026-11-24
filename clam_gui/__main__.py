@@ -276,12 +276,15 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
             run_menu = Gio.Menu()
             edit_menu = Gio.Menu()
             for name, label, section in [('run', '今すぐ検査…(_R)', run_menu),
+                                         ('run-admin', '管理者権限で今すぐ検査…', run_menu),
                                          ('stop', '検査を中止(_S)', run_menu),
                                          ('edit', '編集…(_E)', edit_menu),
                                          ('duplicate', '複製(_D)', edit_menu),
                                          ('delete', '削除(_X)', edit_menu)]:
                 action = Gio.SimpleAction.new(name, None)
                 action.connect('activate', lambda *_, k=key, n=name: self.plan_action(k, n))
+                if name == 'run-admin' and (plan.kind == 'media' or self.backend.name != 'linux'):
+                    continue
                 if plan.kind == 'media' and name in ('duplicate', 'delete'):
                     continue
                 group.add_action(action)
@@ -380,6 +383,8 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
                     widgets['actions'][name].set_enabled(not self.busy and not self.schedule_busy and not running and not unknown)
             widgets['actions']['run'].set_enabled((not self.busy or bool(self.manual_jobs)) and not self.schedule_busy and not running and key not in self.manual_jobs and
                                                    not failed and not widgets['plan'].requires_admin)
+            if 'run-admin' in widgets['actions']:
+                widgets['actions']['run-admin'].set_enabled((not self.busy or bool(self.manual_jobs)) and not self.schedule_busy and not running and key not in self.manual_jobs and not failed)
             widgets['actions']['stop'].set_enabled(bool(running and running.known and not running.stopping) or key in self.manual_jobs)
         if previous is not None and previous != [(a.token, a.stopping, a.known) for a in self.active_runs]:
             self.history(None)
@@ -390,7 +395,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         if name == 'stop':
             self.stop_plan(key)
             return
-        if self.schedule_busy or (self.busy and (name != 'run' or not self.manual_jobs)):
+        if self.schedule_busy or (self.busy and (name not in ('run', 'run-admin') or not self.manual_jobs)):
             return
         self.poll_plans()
         widgets = self.plan_rows.get(key)
@@ -408,7 +413,8 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
                 self.show_notice(f'接続済みの外部メディア{count}件を検査待ちに追加しました。' if count else '検査できる外部メディアが接続されていません。')
             return
         {'edit': self.edit_selected, 'duplicate': self.duplicate_selected,
-         'delete': self.delete_selected, 'run': lambda: self.scan_selected(None)}[name]()
+         'delete': self.delete_selected, 'run': lambda: self.scan_selected(None),
+         'run-admin': lambda: self.confirm(widgets['plan'], key, administrator=True)}[name]()
 
     def toggle_schedule(self, key, enabled):
         widgets = self.plan_rows.get(key)
@@ -628,7 +634,12 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
             self.confirm(selected[1], selected[0])
 
 
-    def confirm(self, plan, key=None):
+    def confirm(self, plan, key=None, *, administrator=False):
+        if administrator:
+            from .admin_scan import available
+            if not available():
+                self.show_notice('管理者検査の補助プログラムが未導入、または更新が必要です。管理者向け導入手順を確認してください。')
+                return
         if self.busy and not self.manual_jobs:
             return
         if key in self.manual_jobs:
@@ -640,9 +651,13 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         except Exception as error:
             self.finished(*record_scan_failure(self.store, plan, error, key), key=key)
             return
+        description = plan.describe()
+        if administrator:
+            description = replace(plan, requires_admin=False).describe().replace('通常ユーザーで検査します。', '管理者権限で検査します。')
         dialog = Gtk.MessageDialog(transient_for=self.operation_parent(), modal=True,
             message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL,
-            text='この範囲を検査しますか？', secondary_text=plan.describe())
+            text='管理者権限でこの範囲を検査しますか？' if administrator else 'この範囲を検査しますか？',
+            secondary_text=description + ('\n\nUbuntuの画面で管理者認証します。GUIは通常権限のままです。削除・隔離は行いません。\n仮想ファイルシステムと対象配下の別ファイルシステムは除外します。' if administrator else ''))
         def response(window, answer):
             window.destroy()
             if answer == Gtk.ResponseType.OK and (not self.busy or self.manual_jobs):
@@ -654,18 +669,18 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
                 self.busy = True
                 self.scan_key = key
                 self.set_controls(False)
-                self.show_notice('検査を受け付けました：' + plan.label)
+                self.show_notice(('管理者検査を受け付けました。順番が来るとUbuntuの認証画面を開きます：' if administrator else '検査を受け付けました：') + plan.label)
                 try:
-                    threading.Thread(target=self.run_scan, args=(plan, key, cancel), daemon=True).start()
+                    threading.Thread(target=self.run_scan, args=(plan, key, cancel, True) if administrator else (plan, key, cancel), daemon=True).start()
                 except Exception as error:
                     self.finished(*record_scan_failure(self.store, plan, error, key), key=key)
         dialog.connect('response', response)
         dialog.present()
 
-    def run_scan(self, target, key, cancel=None):
+    def run_scan(self, target, key, cancel=None, administrator=False):
         try:
             status, output = execute_scan(target, self.store, cancel or self.cancel, scanner=scan,
-                                          profile_id=key, wait=True)
+                                          profile_id=key, wait=True, **({'administrator': True} if administrator else {}))
         except ScanAlreadyQueued as error:
             GLib.idle_add(self.duplicate_scan, key, str(error))
             return

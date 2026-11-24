@@ -996,6 +996,23 @@ def check():
     editor.destroy()
     app.store.delete_profile(admin_key)
     app.refresh_profiles()
+    app.refresh_profiles(key)
+    assert app.plan_rows[key]['actions']['run-admin'].get_enabled()
+    with patch('clam_gui.admin_scan.available', return_value=False):
+        app.plan_action(key, 'run-admin')
+        assert '補助プログラム' in app.notice.get_text()
+    with patch('clam_gui.admin_scan.available', return_value=True), patch.object(app, 'run_scan') as admin_run:
+        app.plan_action(key, 'run-admin')
+        dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+        assert '管理者権限' in dialog.get_property('text')
+        dialog.response(Gtk.ResponseType.CANCEL)
+        admin_run.assert_not_called()
+        app.plan_action(key, 'run-admin')
+        dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+        dialog.response(Gtk.ResponseType.OK)
+        wait_until(lambda: admin_run.called)
+        assert admin_run.call_args.args[-1] is True
+        app.release_manual_job(key)
     app.preferences()
     preferences = [w for w in Gtk.Window.list_toplevels() if w.get_title() == '環境設定']
     assert len(preferences) == 1

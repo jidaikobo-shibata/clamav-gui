@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<policyconfig>
+  <vendor>ClamAV GUI</vendor>
+  <action id="com.jidaikobo.ClamAVGui.admin-scan">
+    <description>Scan files with administrator privileges</description>
+    <description xml:lang="ja">管理者権限でファイルを検査します</description>
+    <message>Authentication is required to scan protected files with ClamAV</message>
+    <message xml:lang="ja">ClamAVで保護されたファイルを検査するには管理者認証が必要です</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/clamav-gui-admin-scan</annotate>
+  </action>
+</policyconfig>
