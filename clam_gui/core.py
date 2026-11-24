@@ -439,6 +439,12 @@ class Plan:
         return '\n'.join(lines)
 
 
+class TargetFolderError(ValueError):
+    def __init__(self, message, index):
+        super().__init__(message)
+        self.target_index = index
+
+
 def validate_profile(plan):
     if plan.limits is not None:
         if not isinstance(plan.limits, dict):
@@ -451,14 +457,16 @@ def validate_profile(plan):
     if not plan.targets or (plan.kind != 'scheduled' and len(plan.targets) != 1):
         raise ValueError('対象フォルダーを指定してください。フォルダー監視・外部メディア検査は1つだけ指定できます。')
     roots = []
-    for target in plan.targets:
+    for index, target in enumerate(plan.targets, 1):
+        if not str(target).strip():
+            raise TargetFolderError(f'対象フォルダーの{index}行目が空です。フォルダーを選択するか、不要な追加欄を取り消してください。', index)
         if not Path(target).is_absolute():
-            raise ValueError('対象フォルダーは絶対パスで指定してください。')
+            raise TargetFolderError(f'対象フォルダーの{index}行目「{target}」は、/ から始まる場所を指定してください。右のフォルダーボタンでも選べます。', index)
         root = Path(os.path.normpath(target))
         if not root.is_dir():
-            raise ValueError('対象フォルダーが見つかりません：' + str(root))
+            raise TargetFolderError(f'対象フォルダーの{index}行目「{root}」が見つからないか、フォルダーではありません。場所を確認するか、右のボタンで選び直してください。', index)
         if any(root == other or root in other.parents or other in root.parents for other in roots):
-            raise ValueError('対象フォルダーの重複や親子関係は指定できません。')
+            raise TargetFolderError(f'対象フォルダーの{index}行目「{root}」は、ほかの対象と重複するか、その親子フォルダーです。どちらか一方だけを指定してください。', index)
         roots.append(root)
     for item in plan.excludes + plan.excluded_dirs:
         path = Path(os.path.normpath(item))

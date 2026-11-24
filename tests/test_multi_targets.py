@@ -44,6 +44,16 @@ class MultipleTargetTests(unittest.TestCase):
             with self.subTest(exclusion=path), self.assertRaises(ValueError):
                 self.store.save_profile(Plan('bad', self.plan.targets, [], excluded_dirs=[path]))
 
+    def test_target_errors_identify_row_and_recovery_action(self):
+        from clam_gui.core import TargetFolderError
+        for target in ('', 'usr/local', str(self.root/'missing')):
+            self.plan.targets = [str(self.a), target]
+            with self.subTest(target=target), self.assertRaises(TargetFolderError) as caught:
+                self.store.save_profile(self.plan)
+            self.assertEqual(caught.exception.target_index, 2)
+            self.assertIn('2行目', str(caught.exception))
+            self.assertNotIn('絶対パス', str(caught.exception))
+
     def test_one_scanner_invocation_receives_all_targets_and_logs_them(self):
         scanner = self.root/'scanner'
         scanner.write_text('#!/usr/bin/python3\nimport sys\nprint("ARGS", *sys.argv[1:])\nprint("Infected files: 0")\n')

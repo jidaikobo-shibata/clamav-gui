@@ -4,7 +4,7 @@ gi.require_version('Gtk', '4.0')
 from dataclasses import replace
 from pathlib import Path
 import threading
-from gi.repository import GLib, Gtk
+from gi.repository import GLib, Gtk, Gdk
 from ..core import Plan
 from ..options import LIMITS, APP_LIMITS
 from ..known_locations import trash_folder, location_label
@@ -86,7 +86,16 @@ class PlanEditor:
                       margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
         scroll = Gtk.ScrolledWindow()
         scroll.set_child(box)
-        editor.set_child(scroll)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        error_label = Gtk.Label(xalign=0, wrap=True, selectable=True,
+                                margin_start=16, margin_end=16, margin_top=8)
+        error_label.add_css_class('error')
+        error_label.set_visible(False)
+        error_label.connect('notify::label', lambda widget, _: widget.set_visible(bool(widget.get_text())))
+        content.append(error_label)
+        scroll.set_vexpand(True)
+        content.append(scroll)
+        editor.set_child(content)
         def entry(label, value, container=None):
             widget = Gtk.Entry(text=value, hexpand=True)
             caption = Gtk.Label(label=label, xalign=0)
@@ -118,12 +127,18 @@ class PlanEditor:
         browse.update_property([Gtk.AccessibleProperty.LABEL], ['基本のフォルダーを選択'])
         browse.connect('clicked', lambda _: pick(Gtk.FileChooserAction.SELECT_FOLDER, root.set_text))
         root_row.append(browse)
+        def bind_validation(widget):
+            widget.connect('changed', lambda *_: refresh_validation())
+            focus = Gtk.EventControllerFocus()
+            focus.connect('leave', lambda *_: refresh_validation(reveal=True))
+            widget.add_controller(focus)
         extra_targets = []
         targets_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.append(targets_box)
         def add_target(path=''):
             row = Gtk.Box(spacing=8)
-            value = Gtk.Entry(text=path, hexpand=True)
+            value = Gtk.Entry(text=path, hexpand=True, placeholder_text='フォルダーを選択…（空欄は保存しません）')
+            value.set_activates_default(True)
             value.update_property([Gtk.AccessibleProperty.LABEL], ['追加の対象フォルダー'])
             row.append(value)
             button = Gtk.Button(icon_name='folder-open-symbolic', tooltip_text='対象フォルダーを選択')
@@ -135,17 +150,19 @@ class PlanEditor:
             def remove_target(_):
                 extra_targets.remove(value)
                 targets_box.remove(row)
+                refresh_validation()
             remove.connect('clicked', remove_target)
             row.append(remove)
             extra_targets.append(value)
             targets_box.append(row)
+            bind_validation(value)
         for target in plan.targets[1:]:
             add_target(str(target))
         add_target_button = Gtk.Button(label='対象フォルダーを追加', halign=Gtk.Align.START)
         add_target_button.connect('clicked', lambda _: add_target())
         box.append(add_target_button)
         def target_paths():
-            return [root.get_text()] + [value.get_text() for value in extra_targets]
+            return [root.get_text()] + [value.get_text() for value in extra_targets if value.get_text().strip()]
         box.append(Gtk.Label(label='除外する対象（フォルダーは配下すべて、ファイルはその1件）',
                              xalign=0, wrap=True))
         exclusions = [(str(p), False) for p in plan.excludes] + [(str(p), True) for p in plan.excluded_dirs]
@@ -222,8 +239,6 @@ class PlanEditor:
         kind_changed()
         state = {'running': False}
         editor.connect('close-request', lambda _: state['running'])
-        error_label = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        box.append(error_label)
         inherited = Gtk.CheckButton(label='環境設定のサイズ上限を使う', active=plan.limits is None)
         box.append(inherited)
         limit_fields = {}
@@ -243,10 +258,11 @@ class PlanEditor:
                 spin.set_sensitive(not inherited.get_active())
         inherited.connect('toggled', update_limits)
         update_limits()
-        save = Gtk.Button(label='検査プランを保存')
+        save = Gtk.Button(label='保存')
+        save.set_tooltip_text('検査プランを保存')
         save.add_css_class('suggested-action')
         def save_profile(_button):
-            nonlocal key
+            nonlocal key, input_error_shown
             if state['running'] or self.busy:
                 return
             try:
@@ -263,7 +279,16 @@ class PlanEditor:
                 if schedule.enabled and new.requires_admin:
                     raise ValueError('管理者権限が必要な対象は定期実行できません。')
             except (ValueError, OSError) as error:
-                error_label.set_text(str(error))
+                error_label.set_text('保存できません：' + str(error))
+                index = getattr(error, 'target_index', None)
+                widgets = [root] + [widget for widget in extra_targets if widget.get_text().strip()]
+                if index is not None and 0 < index <= len(widgets):
+                    widget = widgets[index - 1]
+                    widget.grab_focus()
+                    widget.add_css_class('error')
+                    widget.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, 'dialog-warning-symbolic')
+                    widget.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, str(error))
+                    input_error_shown = True
                 return
             def refresh_saved():
                 self.action_key = key
@@ -291,6 +316,8 @@ class PlanEditor:
                 state['running'] = True
                 self.busy = True
                 box.set_sensitive(False)
+                save.set_sensitive(False)
+                cancel.set_sensitive(False)
                 self.set_controls(False)
                 error_label.set_text('検査プランと予定を保存しています…')
                 def worker():
@@ -310,6 +337,8 @@ class PlanEditor:
                         self.busy = False
                         self.set_controls(True)
                         box.set_sensitive(True)
+                        cancel.set_sensitive(True)
+                        refresh_validation()
                         if profile_saved:
                             refresh_saved()
                         if error:
@@ -323,17 +352,63 @@ class PlanEditor:
                     self.busy = False
                     self.set_controls(True)
                     box.set_sensitive(True)
+                    cancel.set_sensitive(True)
+                    refresh_validation()
                     error_label.set_text('保存処理を開始できませんでした：' + str(error))
                 start_worker(worker, failed)
             dialog.connect('response', response)
             dialog.present()
         save.connect('clicked', save_profile)
-        save_actions = Gtk.Box(spacing=8, homogeneous=True)
         cancel = Gtk.Button(label='キャンセル')
-        cancel.connect('clicked', lambda _: editor.destroy())
-        save_actions.append(cancel)
-        save_actions.append(save)
-        box.append(save_actions)
+        cancel.connect('clicked', lambda _: editor.destroy() if not state['running'] else None)
+        header = Gtk.HeaderBar(show_title_buttons=False)
+        header.set_title_widget(Gtk.Label(label='検査プランの設定'))
+        header.pack_start(cancel)
+        header.pack_end(save)
+        editor.set_titlebar(header)
+        editor.set_default_widget(save)
+        keys = Gtk.EventControllerKey()
+        def key_pressed(_controller, keyval, _keycode, _modifiers):
+            if keyval == Gdk.KEY_Escape and not state['running']:
+                editor.destroy()
+                return True
+            return False
+        keys.connect('key-pressed', key_pressed)
+        editor.add_controller(keys)
+        input_error_shown = False
+        def refresh_validation(*_, reveal=False):
+            nonlocal input_error_shown
+            problem, field = '', None
+            widgets = [root] + extra_targets
+            if not name.get_text().strip():
+                problem, field = 'プラン名を入力してください。', name
+            else:
+                for index, widget in enumerate(widgets, 1):
+                    text = widget.get_text()
+                    if index == 1 and not text.strip():
+                        problem, field = '対象フォルダーを選択してください。右のフォルダーボタンでも選べます。', widget
+                        break
+                    if text.strip() and not Path(text).is_absolute():
+                        problem, field = f'対象フォルダーの{index}行目「{text}」は、/ から始まる場所を指定してください。右のフォルダーボタンでも選べます。', widget
+                        break
+            save.set_sensitive(not problem and not state['running'])
+            save.set_tooltip_text(problem or '検査プランを保存')
+            for widget in [name] + widgets:
+                widget.remove_css_class('error')
+                widget.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, None)
+            if input_error_shown:
+                error_label.set_text('')
+                input_error_shown = False
+            if problem and reveal:
+                error_label.set_text(problem)
+                field.add_css_class('error')
+                field.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, 'dialog-warning-symbolic')
+                field.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, problem)
+                input_error_shown = True
+        for widget in (name, root):
+            widget.set_activates_default(True)
+            bind_validation(widget)
+        refresh_validation()
         editor.present()
 
     def schedule_fields(self, box, saved, plan):
