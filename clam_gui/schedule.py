@@ -141,7 +141,7 @@ class Scheduler:
         if schedule.enabled:
             validate_profile(plan)
         if schedule.enabled and plan.requires_admin:
-            raise ValueError('管理者権限が必要な対象は定期実行できません。')
+            raise ValueError('管理者権限用の旧設定が残っています。編集画面で「通常ユーザーで検査する」を選んでください。')
         is_watch = plan.kind == 'watch'
         content = self.units(key, schedule)
         paths = self.paths(key)

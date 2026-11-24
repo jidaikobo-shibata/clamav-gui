@@ -965,6 +965,37 @@ def check():
     assert dict(app.store.profiles())[multi_key].targets == [str(multi_a)]
     app.store.delete_profile(multi_key)
     app.refresh_profiles()
+    admin_key = app.store.save_profile(Plan('旧管理者設定', [str(multi_a), str(multi_b)], [], requires_admin=True))
+    app.edit_profile(admin_key, dict(app.store.profiles())[admin_key])
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+    normal_user = next(w for w in descendants(editor) if isinstance(w, Gtk.CheckButton) and w.get_label() == '通常ユーザーで検査する')
+    scheduled = next(w for w in descendants(editor) if isinstance(w, Gtk.CheckButton) and w.get_label() == '定期検査を有効にする')
+    assert not normal_user.get_active() and not scheduled.get_sensitive()
+    normal_user.set_active(True)
+    assert scheduled.get_sensitive()
+    assert dict(app.store.profiles())[admin_key].requires_admin
+    next(w for w in descendants(editor) if isinstance(w, Gtk.Button) and w.get_label() == 'キャンセル').emit('clicked')
+    assert dict(app.store.profiles())[admin_key].requires_admin
+    app.edit_profile(admin_key, dict(app.store.profiles())[admin_key])
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+    normal_user = next(w for w in descendants(editor) if isinstance(w, Gtk.CheckButton) and w.get_label() == '通常ユーザーで検査する')
+    normal_user.set_active(True)
+    scheduled = next(w for w in descendants(editor) if isinstance(w, Gtk.CheckButton) and w.get_label() == '定期検査を有効にする')
+    scheduled.set_active(True)
+    with patch('clam_gui.schedule.Scheduler') as manager:
+        manager.return_value.apply.side_effect = lambda k, s: save_schedule(app.store, k, s)
+        next(w for w in descendants(editor) if isinstance(w, Gtk.Button) and w.get_label() == '保存').emit('clicked')
+        confirmation(Gtk.ResponseType.OK)
+        settle()
+        manager.return_value.apply.assert_called_once()
+    assert not dict(app.store.profiles())[admin_key].requires_admin
+    assert read_schedule(app.store, admin_key).enabled
+    app.edit_profile(admin_key, dict(app.store.profiles())[admin_key])
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+    assert not any(isinstance(w, Gtk.CheckButton) and w.get_label() == '通常ユーザーで検査する' for w in descendants(editor))
+    editor.destroy()
+    app.store.delete_profile(admin_key)
+    app.refresh_profiles()
     app.preferences()
     preferences = [w for w in Gtk.Window.list_toplevels() if w.get_title() == '環境設定']
     assert len(preferences) == 1

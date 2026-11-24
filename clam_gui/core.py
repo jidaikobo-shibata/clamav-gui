@@ -435,7 +435,7 @@ class Plan:
                   'サイズ上限・暗号化は警告として報告。定義が3日より古ければ停止。',
                   '削除・隔離は行いません。通常ユーザーで検査します。']
         if self.requires_admin:
-            lines.append('管理者権限が必要：条件の表示のみ。GUIでの実行は未対応です。')
+            lines.append('旧設定：管理者権限用のプランです。編集画面で「通常ユーザーで検査する」を選ぶと実行できます。')
         return '\n'.join(lines)
 
 
@@ -519,7 +519,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
     plan = store.effective_plan(plan)
     cancel = cancel if cancel is not None else threading.Event()
     if plan.requires_admin:
-        raise ValueError('この設定は管理者権限が必要です。GUIでの実行にはまだ対応していません。')
+        raise ValueError('このプランには管理者権限用の旧設定が残っています。編集画面で「通常ユーザーで検査する」を選んで保存してください。')
     if available is not None and not available():
         raise ValueError('検査対象のメディアが取り外されました。')
     validate_profile(plan)

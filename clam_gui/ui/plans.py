@@ -213,6 +213,12 @@ class PlanEditor:
             button = Gtk.Button(label=label)
             button.connect('clicked', lambda _, d=directory, a=action: pick(a, lambda p: add(p, d)))
             exclusion_actions.append(button)
+        normal_user = None
+        if plan.requires_admin:
+            box.append(Gtk.Label(label='このプランには、以前の「管理者権限が必要」という設定が残っています。フォルダーの権限を自動判定した表示ではありません。', xalign=0, wrap=True))
+            normal_user = Gtk.CheckButton(label='通常ユーザーで検査する')
+            box.append(normal_user)
+            box.append(Gtk.Label(label='管理者権限へ昇格せずに検査します。読めない場所は検査不完了として記録されるので、除外するか別途確認してください。保存するまで設定は変わりません。', xalign=0, wrap=True))
         box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL, margin_top=8, margin_bottom=8))
         heading = Gtk.Label(label='スケジュール', xalign=0)
         heading.add_css_class('heading')
@@ -220,12 +226,15 @@ class PlanEditor:
         saved_schedule = read_schedule(self.store, key) if key else Schedule()
         scheduled_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.append(scheduled_box)
-        read_fields = self.schedule_fields(scheduled_box, saved_schedule, plan)
+        read_fields = self.schedule_fields(scheduled_box, saved_schedule, plan, normal_user)
         watch_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         watch_enabled = Gtk.CheckButton(label='フォルダー監視を有効にする', active=saved_schedule.enabled)
         recursive = Gtk.CheckButton(label='サブフォルダーも監視する', active=plan.watch_recursive)
         watch_box.append(watch_enabled)
         watch_box.append(recursive)
+        if plan.requires_admin:
+            watch_enabled.set_sensitive(False)
+            normal_user.connect('toggled', lambda widget: watch_enabled.set_sensitive(widget.get_active()))
         watch_box.append(Gtk.Label(label='追加・変更されたファイルを、書き込みが落ち着いてから検査します。\n'
             '一時ファイルは待機し、検査待ちをまとめます。アプリ自身のデータ・ロック用フォルダーは監視しません。\n'
             '常駐監視を有効にすると画面を閉じても動作します。初回は別途フォルダー全体を検査してください。', xalign=0, wrap=True))
@@ -269,7 +278,8 @@ class PlanEditor:
                 from ..core import validate_profile
                 new = Plan(name.get_text().strip(), target_paths(),
                            [p for p, directory in exclusions if not directory], plan.phishing,
-                           [p for p, directory in exclusions if directory], plan.requires_admin,
+                           [p for p, directory in exclusions if directory],
+                           plan.requires_admin and not (normal_user and normal_user.get_active()),
                            'watch' if kind.get_selected() == 1 else 'scheduled', recursive.get_active(),
                            None if inherited.get_active() else {k: v.get_value_as_int() for k, v in limit_fields.items()})
                 validate_profile(new)
@@ -277,7 +287,7 @@ class PlanEditor:
                             if new.kind == 'watch' else read_fields())
                 schedule.calendar()
                 if schedule.enabled and new.requires_admin:
-                    raise ValueError('管理者権限が必要な対象は定期実行できません。')
+                    raise ValueError('管理者権限用の旧設定が残っています。編集画面で「通常ユーザーで検査する」を選んでください。')
             except (ValueError, OSError) as error:
                 error_label.set_text('保存できません：' + str(error))
                 index = getattr(error, 'target_index', None)
@@ -293,7 +303,7 @@ class PlanEditor:
             def refresh_saved():
                 self.action_key = key
                 self.refresh_profiles(key if is_new else None)
-            changed = schedule != saved_schedule or new.kind != plan.kind
+            changed = schedule != saved_schedule or new.kind != plan.kind or new.requires_admin != plan.requires_admin
             if not changed:
                 try:
                     key = self.store.save_profile(new, key)
@@ -411,12 +421,19 @@ class PlanEditor:
         refresh_validation()
         editor.present()
 
-    def schedule_fields(self, box, saved, plan):
+    def schedule_fields(self, box, saved, plan, normal_user=None):
         enabled = Gtk.CheckButton(label='定期検査を有効にする', active=saved.enabled)
-        enabled.set_sensitive(not plan.requires_admin)
         box.append(enabled)
         if plan.requires_admin:
-            box.append(Gtk.Label(label='管理者権限が必要な対象は、現在は定期実行できません。', wrap=True))
+            guidance = Gtk.Label(label='上の「通常ユーザーで検査する」を選ぶと、定期検査を設定できます。', xalign=0, wrap=True)
+            box.append(guidance)
+            def update_permission(*_):
+                allowed = normal_user is not None and normal_user.get_active()
+                enabled.set_sensitive(allowed)
+                guidance.set_visible(not allowed)
+            if normal_user is not None:
+                normal_user.connect('toggled', update_permission)
+            update_permission()
         def field(label, widget):
             widget.update_property([Gtk.AccessibleProperty.LABEL], [label])
             row = Gtk.Box(spacing=12)
