@@ -8,7 +8,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 
-from ..definitions import AutoUpdateState, definition_update_label
+from ..definitions import AutoUpdateState, CHECK_INTERVAL, definition_update_label
 from ..engine import database, executable, startup_error
 from ..notifications import definition_status
 from .windows_tasks import Scheduler, Task, trigger_for
@@ -55,7 +55,7 @@ class Packages:
 
 
 class Updates:
-    def update(self, cancel=None, progress=None, **kwargs):
+    def update(self, cancel=None, progress=None, scheduled=False, timeout=None, **kwargs):
         from .windows_process import FileLock, JobProcess
         binary = executable('freshclam')
         if not binary:
@@ -63,9 +63,29 @@ class Updates:
         folder = database()
         folder.mkdir(exist_ok=True, parents=True)
         lock = FileLock(folder.parent/'freshclam.lock')
-        if not lock.acquire():
-            raise ValueError('定義ファイルを更新中です。')
+        marker = folder.parent/'freshclam-success'
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        def interrupted():
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError('定義更新の待機時間を超えました。')
+            return cancel and cancel.is_set()
+
+        while not lock.acquire():
+            if not scheduled:
+                raise ValueError('定義ファイルを更新中です。')
+            if interrupted():
+                return '定義更新を中止しました。', ''
+            time.sleep(0.5)
         try:
+            def files_present():
+                return all(any(path.is_file() and path.stat().st_size > 0
+                               for path in (folder/(name+'.cvd'), folder/(name+'.cld')))
+                           for name in ('daily', 'main', 'bytecode'))
+
+            if interrupted():
+                return '定義更新を中止しました。', ''
+            if scheduled and marker.is_file() and 0 <= time.time() - marker.stat().st_mtime < CHECK_INTERVAL and files_present():
+                return '1時間以内に定義の更新確認が成功しています。', ''
             with tempfile.TemporaryDirectory(dir=folder.parent) as tmp, tempfile.TemporaryFile() as log:
                 config = Path(tmp)/'freshclam.conf'
                 config.write_text('DatabaseMirror database.clamav.net\n', encoding='ascii')
@@ -77,7 +97,7 @@ class Updates:
                             code = p.wait(0.5)
                             break
                         except subprocess.TimeoutExpired:
-                            if cancel and cancel.is_set():
+                            if interrupted():
                                 return '定義更新を中止しました。', ''
                 finally:
                     p.terminate()
@@ -87,9 +107,9 @@ class Updates:
                 output = log.read().decode('utf-8', errors='replace')
                 if code:
                     raise RuntimeError(startup_error(code) or output or f'FreshClam終了コード {code}')
-                if not all(any((folder / (name + ext)).is_file() for ext in ('.cvd', '.cld'))
-                           for name in ('daily', 'main', 'bytecode')):
+                if not files_present():
                     raise RuntimeError('更新後の定義ファイルを確認できません。')
+                marker.touch()
                 return '定義ファイルの更新確認が完了しました。', output
         finally:
             lock.close()

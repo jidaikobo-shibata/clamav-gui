@@ -367,7 +367,8 @@ def _exclude_pattern(path):
     return re.escape(os.path.normpath(str(path)))
 
 
-def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None, available=None, wait=False, can_start=None):
+def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None, available=None, wait=False, can_start=None,
+         check_definitions=False):
     plan = target if isinstance(target, Plan) else Plan('フォルダー検査', [Path(target).absolute()], [])
     plan = store.effective_plan(plan)
     cancel = cancel if cancel is not None else threading.Event()
@@ -409,6 +410,25 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                     raise ScanBusyError('別の検査が実行中です。') from None
                 cancel.wait(.5)
             # Recheck the target after a potentially long wait, before starting ClamAV.
+            definition_note = ''
+            if check_definitions:
+                from .definitions import CHECK_TIMEOUT
+
+                class UpdateCancellation:
+                    def is_set(self):
+                        return cancel.is_set() or running.cancelled() or (can_start is not None and not can_start())
+
+                update_cancel = UpdateCancellation()
+                try:
+                    definition_note, _ = get_backend().updater().update(
+                        cancel=update_cancel, timeout=CHECK_TIMEOUT, scheduled=True, restore_stopped=True)
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                    definition_note = '定義の更新を確認できませんでした。' + str(error)
+                if update_cancel.is_set():
+                    reason = '定義確認中に検査が取り消されたか、予定が変更されました。'
+                    status = ScanStatus(reason, ResultKind.CANCELLED, started_at=started)
+                    store.save(started, plan.describe(), status, reason, profile_id)
+                    return status, reason
             validate_profile(plan)
             started = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
             running.started(started)
@@ -470,6 +490,8 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                 status += '\n複数のメールをまとめて保存できる形式です。'
                 status += '\n保存ファイル自体は削除せず、メールアプリで確認してください。'
                 output += '\n\n' + mailbox_guidance(findings)
+            if definition_note:
+                output += '\n\n--- 検査前の定義確認 ---\n' + definition_note
             output += '\n\n--- この検査で使用した設定 ---\n' + describe_options(settings, supported)
             output += '\n' + describe_limits(limits)
             output += '\n検査上限の警告・ヒューリスティック警告: 有効（固定）\n'

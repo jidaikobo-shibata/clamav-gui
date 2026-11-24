@@ -9,6 +9,8 @@ import threading
 import time
 
 SERVICE = 'clamav-freshclam.service'
+CHECK_INTERVAL = 3600
+CHECK_TIMEOUT = 180
 
 
 def definition_update_label(directory=Path('/var/lib/clamav')):
@@ -172,18 +174,20 @@ class DefinitionUpdater:
                        for path in (self.database/(name+'.cvd'), self.database/(name+'.cld')))
                    for name in expected)
 
-    def update(self, cancel=None, progress=None, timeout=1800, restore_stopped=False):
+    def update(self, cancel=None, progress=None, timeout=1800, restore_stopped=False, scheduled=False):
         self._temporary_started = False
+        self._service_command = (['/usr/bin/systemctl', '--no-ask-password'] if scheduled else
+                                 ['/usr/bin/pkexec', '/usr/bin/systemctl'])
         temporary_stopped = False
         try:
-            result, log = self._update(cancel, progress, timeout)
+            result, log = self._update(cancel, progress, timeout, scheduled)
         finally:
             if restore_stopped and self._temporary_started:
                 current = AutoUpdateService(self.run, self.config).status()
                 if current.enabled is None or current.running is None:
                     raise ValueError('一時起動したサービスの状態を確認できません。自動更新の設定を確認してください。')
                 if current.enabled is False and current.running:
-                    stopped = self.command(['/usr/bin/pkexec', '/usr/bin/systemctl', 'stop', SERVICE], timeout=180)
+                    stopped = self.command(self._service_command + ['stop', SERVICE], timeout=180)
                     if stopped.returncode or AutoUpdateService(self.run, self.config).status().running is not False:
                         raise ValueError('一時起動した更新サービスを停止できませんでした。自動更新の現在の状態を確認してください。')
                     temporary_stopped = True
@@ -194,7 +198,7 @@ class DefinitionUpdater:
             result += '\n一時起動した更新サービスは停止しました。自動更新は無効のままです。'
         return result, log
 
-    def _update(self, cancel=None, progress=None, timeout=1800):
+    def _update(self, cancel=None, progress=None, timeout=1800, scheduled=False):
         cancel = cancel or threading.Event()
         progress = progress or (lambda text: None)
         expected = self.expected()
@@ -209,7 +213,15 @@ class DefinitionUpdater:
         active = state.returncode == 0
         tracker = UpdateTracker(expected)
         for row in initial:
+            was_complete = tracker.complete()
             tracker.feed(row['MESSAGE'])
+            if scheduled and not was_complete and tracker.complete():
+                try:
+                    age = (barrier - int(row['__REALTIME_TIMESTAMP'])) / 1_000_000
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if 0 <= age < CHECK_INTERVAL and self.files_present(expected):
+                    return '1時間以内に定義の更新確認が成功しています。', ''
         pending = active and tracker.started and not tracker.complete() and not tracker.failed
         if cancel.is_set():
             return '監視を終了しました。更新サービスは停止していません。', ''
@@ -218,9 +230,9 @@ class DefinitionUpdater:
         else:
             tracker = UpdateTracker(expected)
             if active:
-                command = ['/usr/bin/pkexec', '/usr/bin/systemctl', 'kill', '--kill-whom=main', '--signal=SIGUSR1', SERVICE]
+                command = self._service_command + ['kill', '--kill-whom=main', '--signal=SIGUSR1', SERVICE]
             else:
-                command = ['/usr/bin/pkexec', '/usr/bin/systemctl', 'start', SERVICE]
+                command = self._service_command + ['start', SERVICE]
             result = self.command(command, timeout=180)
             if result.returncode in (126, 127):
                 return '更新依頼をキャンセルしました。', result.stderr

@@ -3,10 +3,30 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from clam_gui.core import Store, Plan, record_scan_failure
+from clam_gui.core import Store, Plan, record_scan_failure, scan
+from clam_gui.platforms import get_backend
 
 
 class ScanFailureTests(unittest.TestCase):
+    def test_scheduled_scan_keeps_age_limit_and_records_update_failure(self):
+        from clam_gui.options import DEFAULTS
+        backend = type(get_backend())
+        with tempfile.TemporaryDirectory() as root, \
+             patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)), \
+             patch('clam_gui.core.executable', return_value='clamscan'), \
+             patch.object(backend, 'updater') as updater, \
+             patch.object(backend, 'spawn_scanner') as scanner:
+            store = Store(root)
+            plan = Plan('test', [root], [])
+            key = store.save_profile(plan)
+            updater.return_value.update.side_effect = TimeoutError('offline')
+            scanner.return_value.wait.return_value = 0
+            status, _ = scan(plan, store, profile_id=key, lock_path=Path(root)/'lock',
+                             wait=True, check_definitions=True)
+            self.assertTrue(status.assessment.clean)
+            self.assertIn('--fail-if-cvd-older-than=3', scanner.call_args.args[0])
+            self.assertIn('offline', store.history_entries(key, plan)[0].output)
+
     def test_reason_and_profile_are_saved_without_replacing_existing_history(self):
         with tempfile.TemporaryDirectory() as root:
             store = Store(root)
