@@ -91,6 +91,7 @@ class PreferencesWindow:
         pages = Gtk.Notebook(vexpand=True)
         box.append(pages)
         read_automation = self.automation_preferences(pages)
+        self.admin_helper_preferences(pages)
         settings = self.store.scan_options()
         controls = {}
         for group in ('ファイル形式', '検出方法', '警告'):

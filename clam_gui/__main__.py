@@ -18,6 +18,7 @@ from .platforms import get_backend
 from .runtime import activities, request_stop
 
 from .ui.plans import PlanEditor
+from .ui.admin_helper import AdminHelperWindow
 from .ui.preferences import PreferencesWindow
 from .ui.packages import PackageWindow
 from .ui.history import HistoryView
@@ -25,7 +26,7 @@ from .ui.report import ReportPane
 from .ui.plan_order import PlanOrderWindow
 
 
-class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk.Application):
+class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindow, HistoryView, Gtk.Application):
     def __init__(self):
         super().__init__(application_id='com.jidaikobo.ClamAVGui')
         self.store = Store()
@@ -638,7 +639,7 @@ class Application(PlanEditor, PreferencesWindow, PackageWindow, HistoryView, Gtk
         if administrator:
             from .admin_scan import available
             if not available():
-                self.show_notice('管理者検査の補助プログラムが未導入、または更新が必要です。管理者向け導入手順を確認してください。')
+                self.admin_helper_setup(on_ready=lambda: self.confirm(plan, key, administrator=True))
                 return
         if self.busy and not self.manual_jobs:
             return

@@ -23,6 +23,7 @@ from clam_gui.mailboxes import MAILBOX_NOTE, mailbox_guidance
 from unittest.mock import patch
 from clam_gui.definitions import AutoUpdateState
 patch('clam_gui.background.BackgroundService.reconcile', return_value='自動検査：テスト環境').start()
+patch('clam_gui.admin_helper_setup.AdminHelperSetup.status', return_value='missing').start()
 auto_patch = patch('clam_gui.definitions.AutoUpdateService')
 auto_service = auto_patch.start()
 patch('clam_gui.packages.AptManager.engine_update_status', return_value=('ClamAV本体（APT） test：更新なし（APT情報）', 'test')).start()
@@ -1000,7 +1001,35 @@ def check():
     assert app.plan_rows[key]['actions']['run-admin'].get_enabled()
     with patch('clam_gui.admin_scan.available', return_value=False):
         app.plan_action(key, 'run-admin')
-        assert '補助プログラム' in app.notice.get_text()
+        setup = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '管理者検査の補助機能')
+        assert any(isinstance(w, Gtk.Label) and '認証は別々' in w.get_text() for w in descendants(setup))
+        next(w for w in descendants(setup) if isinstance(w, Gtk.Button) and w.get_label() == 'キャンセル').emit('clicked')
+        assert app.admin_setup_window is None
+    ready = [False]
+    from clam_gui.admin_helper_setup import SetupCancelled
+    with patch('clam_gui.admin_scan.available', side_effect=lambda: ready[0]), patch('clam_gui.admin_helper_setup.AdminHelperSetup.execute') as install:
+        app.plan_action(key, 'run-admin')
+        setup = app.admin_setup_window
+        apply = next(w for w in descendants(setup) if isinstance(w, Gtk.Button) and w.get_label() == '導入・更新する')
+        install.side_effect = SetupCancelled('認証をキャンセルしました')
+        apply.emit('clicked')
+        wait_until(lambda: not app.schedule_busy)
+        assert app.admin_setup_window is setup
+        assert apply.get_sensitive()
+        assert any(isinstance(w, Gtk.Label) and 'キャンセルしました' in w.get_text() for w in descendants(setup))
+        install.side_effect = lambda action: ready.__setitem__(0, True)
+        apply.emit('clicked')
+        wait_until(lambda: not app.schedule_busy and app.admin_setup_window is None)
+        install.assert_called_with('install')
+        dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))
+        assert '管理者権限' in dialog.get_property('text')
+        dialog.response(Gtk.ResponseType.CANCEL)
+    with patch('clam_gui.admin_helper_setup.AdminHelperSetup.execute') as remove_helper:
+        app.admin_helper_setup(action='remove')
+        setup = app.admin_setup_window
+        next(w for w in descendants(setup) if isinstance(w, Gtk.Button) and w.get_label() == '削除する').emit('clicked')
+        wait_until(lambda: not app.schedule_busy and app.admin_setup_window is None)
+        remove_helper.assert_called_once_with('remove')
     with patch('clam_gui.admin_scan.available', return_value=True), patch.object(app, 'run_scan') as admin_run:
         app.plan_action(key, 'run-admin')
         dialog = next(w for w in Gtk.Window.list_toplevels() if isinstance(w, Gtk.MessageDialog))

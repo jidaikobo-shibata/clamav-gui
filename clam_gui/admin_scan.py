@@ -23,16 +23,20 @@ def trusted(path):
 
 
 def available():
-    return (os.name == 'posix' and trusted(HELPER) and trusted(POLICY)
-            and Path('/usr/bin/pkexec').is_file() and Path('/usr/bin/bwrap').is_file()
-            and hashlib.sha256(HELPER.read_bytes()).digest() == hashlib.sha256(SOURCE.read_bytes()).digest())
+    try:
+        return (os.name == 'posix' and trusted(HELPER) and trusted(POLICY)
+                and Path('/usr/bin/pkexec').is_file() and Path('/usr/bin/bwrap').is_file()
+                and hashlib.sha256(HELPER.read_bytes()).digest() == hashlib.sha256(SOURCE.read_bytes()).digest()
+                and POLICY.read_bytes() == (SOURCE.parent/POLICY.name).read_bytes())
+    except OSError:
+        return False
 
 
 class AdminProcess:
     """Popen-compatible cancellation: root broker watches this private pipe."""
     def __init__(self, request, **kwargs):
         if not available():
-            raise ValueError('管理者検査の補助プログラムが未導入、または更新が必要です。管理者向け導入手順を確認してください。')
+            raise ValueError('管理者検査の補助プログラムが未導入、または更新が必要です。環境設定の「管理者検査」で導入・更新してください。')
         payload = (json.dumps(request, ensure_ascii=True) + '\n').encode()
         if len(payload) > 4096:
             raise ValueError('対象・除外設定が多すぎます。管理者検査のプランを分けてください。')
