@@ -4,6 +4,8 @@ from pathlib import Path
 
 
 def safe_watch_plan(plan, data_directory):
+    if len(plan.targets) != 1:
+        raise ValueError('フォルダー監視の対象は1つだけ指定してください。')
     root = Path(plan.targets[0])
     real_root = root.resolve()
     protected = (Path(data_directory).resolve(), (Path.home()/'.clamdlog').resolve())

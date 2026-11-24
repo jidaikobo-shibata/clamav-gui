@@ -448,15 +448,23 @@ def validate_profile(plan):
         raise ValueError('検査プランの種類・監視範囲が不正です。')
     if not plan.label.strip():
         raise ValueError('検査プランの名前を入力してください。')
-    if len(plan.targets) != 1 or not Path(plan.targets[0]).is_absolute():
-        raise ValueError('基本の対象はフォルダー1つを絶対パスで指定してください。')
-    root = Path(os.path.normpath(plan.targets[0]))
-    if not root.is_dir():
-        raise ValueError('基本の対象フォルダーが見つかりません。')
+    if not plan.targets or (plan.kind != 'scheduled' and len(plan.targets) != 1):
+        raise ValueError('対象フォルダーを指定してください。フォルダー監視・外部メディア検査は1つだけ指定できます。')
+    roots = []
+    for target in plan.targets:
+        if not Path(target).is_absolute():
+            raise ValueError('対象フォルダーは絶対パスで指定してください。')
+        root = Path(os.path.normpath(target))
+        if not root.is_dir():
+            raise ValueError('対象フォルダーが見つかりません：' + str(root))
+        if any(root == other or root in other.parents or other in root.parents for other in roots):
+            raise ValueError('対象フォルダーの重複や親子関係は指定できません。')
+        roots.append(root)
     for item in plan.excludes + plan.excluded_dirs:
         path = Path(os.path.normpath(item))
-        if not Path(item).is_absolute() or path == root or root not in path.parents:
-            raise ValueError('除外は基本の対象フォルダー内を指定してください。対象全体は除外できません。')
+        if not Path(item).is_absolute() or path in roots or not any(root in path.parents for root in roots):
+            raise ValueError('除外は対象フォルダー内を指定してください。対象全体は除外できません。')
+
 
 
 

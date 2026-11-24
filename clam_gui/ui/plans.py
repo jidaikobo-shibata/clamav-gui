@@ -102,7 +102,7 @@ class PlanEditor:
         kind.set_selected(1 if plan.kind == 'watch' else 0)
         box.append(kind)
         root_row = Gtk.Box(spacing=8)
-        root = entry('基本の対象フォルダー', str(plan.targets[0]), root_row)
+        root = entry('対象フォルダー', str(plan.targets[0]), root_row)
         box.append(root_row)
         def pick(action, callback):
             chooser = Gtk.FileChooserNative(title='対象を選択', transient_for=editor,
@@ -118,6 +118,34 @@ class PlanEditor:
         browse.update_property([Gtk.AccessibleProperty.LABEL], ['基本のフォルダーを選択'])
         browse.connect('clicked', lambda _: pick(Gtk.FileChooserAction.SELECT_FOLDER, root.set_text))
         root_row.append(browse)
+        extra_targets = []
+        targets_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.append(targets_box)
+        def add_target(path=''):
+            row = Gtk.Box(spacing=8)
+            value = Gtk.Entry(text=path, hexpand=True)
+            value.update_property([Gtk.AccessibleProperty.LABEL], ['追加の対象フォルダー'])
+            row.append(value)
+            button = Gtk.Button(icon_name='folder-open-symbolic', tooltip_text='対象フォルダーを選択')
+            button.update_property([Gtk.AccessibleProperty.LABEL], ['対象フォルダーを選択'])
+            button.connect('clicked', lambda _: pick(Gtk.FileChooserAction.SELECT_FOLDER, value.set_text))
+            row.append(button)
+            remove = Gtk.Button(icon_name='list-remove-symbolic', tooltip_text='対象フォルダーを取り消す')
+            remove.update_property([Gtk.AccessibleProperty.LABEL], ['対象フォルダーを取り消す'])
+            def remove_target(_):
+                extra_targets.remove(value)
+                targets_box.remove(row)
+            remove.connect('clicked', remove_target)
+            row.append(remove)
+            extra_targets.append(value)
+            targets_box.append(row)
+        for target in plan.targets[1:]:
+            add_target(str(target))
+        add_target_button = Gtk.Button(label='対象フォルダーを追加', halign=Gtk.Align.START)
+        add_target_button.connect('clicked', lambda _: add_target())
+        box.append(add_target_button)
+        def target_paths():
+            return [root.get_text()] + [value.get_text() for value in extra_targets]
         box.append(Gtk.Label(label='除外する対象（フォルダーは配下すべて、ファイルはその1件）',
                              xalign=0, wrap=True))
         exclusions = [(str(p), False) for p in plan.excludes] + [(str(p), True) for p in plan.excluded_dirs]
@@ -150,7 +178,7 @@ class PlanEditor:
             trash_notice = Gtk.Label(xalign=0, wrap=True)
             def add_trash(_button):
                 path = str(trash_folder())
-                draft = replace(plan, targets=[root.get_text()], excluded_dirs=[p for p, directory in exclusions if directory])
+                draft = replace(plan, targets=target_paths(), excluded_dirs=[p for p, directory in exclusions if directory])
                 reason = exclusion_state(draft, path)
                 if reason:
                     trash_notice.set_text(reason)
@@ -188,6 +216,7 @@ class PlanEditor:
         def kind_changed(*_):
             scheduled_box.set_visible(kind.get_selected() == 0)
             watch_box.set_visible(kind.get_selected() == 1)
+            add_target_button.set_visible(kind.get_selected() == 0)
             heading.set_text('フォルダー監視' if kind.get_selected() == 1 else 'スケジュール')
         kind.connect('notify::selected', kind_changed)
         kind_changed()
@@ -222,7 +251,7 @@ class PlanEditor:
                 return
             try:
                 from ..core import validate_profile
-                new = Plan(name.get_text().strip(), [root.get_text()],
+                new = Plan(name.get_text().strip(), target_paths(),
                            [p for p, directory in exclusions if not directory], plan.phishing,
                            [p for p, directory in exclusions if directory], plan.requires_admin,
                            'watch' if kind.get_selected() == 1 else 'scheduled', recursive.get_active(),

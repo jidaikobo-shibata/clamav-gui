@@ -176,8 +176,8 @@ class ExclusionWindow(Gtk.Window):
         self.add_button.set_sensitive(bool(query) and self.plan is not None and self.plan.kind != 'media')
         self.open_button.set_sensitive(os.path.isabs(resolve_location(query)) and not self.opening)
         trash = trash_folder()
-        root = self.plan.targets[0] if self.plan else None
-        in_scope = bool(trash is not None and root and trash != Path(os.path.normpath(root)) and covered_by(trash, [root]))
+        roots = self.plan.targets if self.plan else []
+        in_scope = bool(trash is not None and roots and str(trash) not in roots and covered_by(trash, roots))
         editable = self.plan is not None and self.plan.kind != 'media'
         self.trash_button.set_visible(in_scope and editable)
         self.trash_button.set_sensitive(in_scope and editable and not covered_by(trash, self.draft_exclusions))
@@ -338,7 +338,7 @@ class ExclusionWindow(Gtk.Window):
                       margin_start=16, margin_end=16, margin_top=16, margin_bottom=16)
         dialog.set_child(box)
         box.append(self.pane.label('変更する現在の検査プラン：' + current.label, 'heading'))
-        box.append(self.pane.label('現在の対象：' + str(current.targets[0])))
+        box.append(self.pane.label('現在の対象：\n' + '\n'.join(str(target) for target in current.targets)))
         text = '追加するフォルダーと配下すべては、次回から検査対象外になります。取り消した除外範囲は、他の除外に含まれなければ再び検査対象になります。実際のファイルは変更しません。'
         box.append(self.pane.label(text))
         listing = Gtk.ScrolledWindow(vexpand=True)

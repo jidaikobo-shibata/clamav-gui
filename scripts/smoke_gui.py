@@ -918,6 +918,32 @@ def check():
         days = [w for w in descendants(editor) if isinstance(w, Gtk.CheckButton) and w.get_label() in list('月火水木金土日')]
         assert [i for i, w in enumerate(days) if w.get_active()] == [0, 3]
         editor.destroy()
+    multi_a, multi_b = app.store.path.parent/'multi-a', app.store.path.parent/'multi-b'
+    multi_a.mkdir()
+    multi_b.mkdir()
+    multi_key = app.store.save_profile(Plan('複数フォルダー', [str(multi_a)], []))
+    app.edit_profile(multi_key, dict(app.store.profiles())[multi_key])
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+    add_target = next(w for w in descendants(editor) if isinstance(w, Gtk.Button) and w.get_label() == '対象フォルダーを追加')
+    add_target.emit('clicked')
+    additional = next(w for w in descendants(add_target.get_prev_sibling()) if isinstance(w, Gtk.Entry))
+    additional.set_text(str(multi_b))
+    next(w for w in descendants(editor) if isinstance(w, Gtk.Button) and w.get_label() == '検査プランを保存').emit('clicked')
+    assert dict(app.store.profiles())[multi_key].targets == [str(multi_a), str(multi_b)]
+    app.edit_profile(multi_key, dict(app.store.profiles())[multi_key])
+    editor = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == '検査プランの設定')
+    assert any(isinstance(w, Gtk.Entry) and w.get_text() == str(multi_b) for w in descendants(editor))
+    kind = next(w for w in descendants(editor) if isinstance(w, Gtk.DropDown) and w.get_model().get_n_items() == 2)
+    kind.set_selected(1)
+    next(w for w in descendants(editor) if isinstance(w, Gtk.Button) and w.get_label() == '検査プランを保存').emit('clicked')
+    assert any(isinstance(w, Gtk.Label) and '1つだけ' in w.get_text() for w in descendants(editor))
+    kind.set_selected(0)
+    remove = next(w for w in descendants(editor) if isinstance(w, Gtk.Button) and w.get_tooltip_text() == '対象フォルダーを取り消す')
+    remove.emit('clicked')
+    next(w for w in descendants(editor) if isinstance(w, Gtk.Button) and w.get_label() == '検査プランを保存').emit('clicked')
+    assert dict(app.store.profiles())[multi_key].targets == [str(multi_a)]
+    app.store.delete_profile(multi_key)
+    app.refresh_profiles()
     app.preferences()
     preferences = [w for w in Gtk.Window.list_toplevels() if w.get_title() == '環境設定']
     assert len(preferences) == 1

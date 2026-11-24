@@ -39,13 +39,13 @@ def exclusion_state(plan, folder, threats=()):
     """Return a reason when a folder must not be offered for exclusion."""
     if plan.kind == 'media':
         return '外部メディア検査の除外はここでは変更できません。'
-    root = Path(os.path.normpath(str(plan.targets[0])))
+    roots = [Path(os.path.normpath(str(target))) for target in plan.targets]
     path = Path(os.path.normpath(str(folder)))
-    if not path.is_absolute() or path == root or root not in path.parents:
+    if not path.is_absolute() or path in roots or not any(root in path.parents for root in roots):
         return '検査対象全体・対象外の場所は除外候補にできません。'
     try:
-        real_root, real_path = root.resolve(), path.resolve()
-        if real_root == real_path or real_root not in real_path.parents:
+        real_roots, real_path = [root.resolve() for root in roots], path.resolve()
+        if real_path in real_roots or not any(root in real_path.parents for root in real_roots):
             return 'リンク先が検査対象全体・対象外の場所になるため選択できません。'
         if not path.is_dir():
             # Register the known trash before first use without creating it.
