@@ -1,6 +1,7 @@
 from dataclasses import replace
 import datetime
 from pathlib import Path
+from clam_gui.platforms import get_backend
 import subprocess
 import tempfile
 import threading
@@ -94,10 +95,21 @@ class AutomationTests(unittest.TestCase):
         self.assertFalse(allowed_file(replace(self.plan, watch_recursive=False), path))
         self.assertFalse(allowed_file(replace(self.plan, excluded_dirs=[str(path.parent)]), path))
         self.assertFalse(allowed_file(replace(self.plan, excludes=[str(path)]), path))
-        link = self.folder/'link'; link.symlink_to(path)
+        link = self.folder/'link'
+        try:
+            link.symlink_to(path)
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows symlink privilege unavailable")
+            raise
         self.assertFalse(allowed_file(self.plan, link))
         outside = self.root/'outside'; outside.mkdir(); (outside/'file').touch()
-        (self.folder/'escape').symlink_to(outside, target_is_directory=True)
+        try:
+            (self.folder/'escape').symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows symlink privilege unavailable")
+            raise
         self.assertFalse(allowed_file(self.plan, self.folder/'escape/file'))
 
     def test_queue_bound_batch_limit_and_deleted_file(self):
@@ -171,7 +183,7 @@ class AutomationTests(unittest.TestCase):
             self.assertIn('--follow-file-symlinks=0',command)
             kwargs['stdout'].write(b'Scanned files: 1\nInfected files: 0\n')
             return Mock(wait=Mock(return_value=0))
-        with patch('clam_gui.core.shutil.which',return_value='/mock/clamscan'),patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)),patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner',side_effect=spawn):
+        with patch('clam_gui.core.executable',return_value='/mock/clamscan'),patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)),patch.object(type(get_backend()), 'spawn_scanner',side_effect=spawn):
             status,output=scan(self.plan,self.store,lock_path=self.root/'lock',profile_id='watch',files=[str(path)])
         self.assertTrue(status.startswith('検査完了'))
         self.assertIn(str(path),output)
@@ -189,7 +201,7 @@ class AutomationTests(unittest.TestCase):
                     raise subprocess.TimeoutExpired(command,.2)
                 return -15
             return Mock(wait=wait)
-        with patch('clam_gui.core.shutil.which',return_value='/mock/clamscan'),patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)),patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner',side_effect=spawn):
+        with patch('clam_gui.core.executable',return_value='/mock/clamscan'),patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)),patch.object(type(get_backend()), 'spawn_scanner',side_effect=spawn):
             status,_=scan(replace(self.plan,kind='media'),self.store,lock_path=self.root/'lock',profile_id=MEDIA_ID,available=lambda:alive[0])
         self.assertIn('取り外されました',status)
         self.assertEqual(len(self.store.history_entries(MEDIA_ID,media_plan())),1)

@@ -45,6 +45,9 @@ class Observers:
         self.current = None
         self.active_key = None
         self.mounts = {}
+        self.observe_volumes(volumes)
+
+    def observe_volumes(self, volumes):
         self.volumes = volumes if volumes is not None else Gio.VolumeMonitor.get()
         self.signals = [self.volumes.connect('mount-added', self.mount_added),
                         self.volumes.connect('mount-removed', self.mount_removed)]

@@ -4,6 +4,7 @@ from dataclasses import replace
 import threading
 import shutil
 import time
+from .engine import executable
 import gi
 
 gi.require_version('Gtk', '4.0')
@@ -188,7 +189,7 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
             return True
         self.install_prompt_timer = None
         self.install_prompt_checked = True
-        if shutil.which('clamscan'):
+        if executable():
             return False
         dialog = Gtk.MessageDialog(application=self, transient_for=self.window, modal=True,
             destroy_with_parent=True,
@@ -585,11 +586,22 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
             self.automatic_notice_timers[key] = GLib.timeout_add_seconds(20, self.flush_automatic_notice, key, True)
 
     def deliver_automatic_notice(self, key, notice):
-        notification = Gio.Notification.new(notice.title)
-        notification.set_body(notice.body)
-        if notice.urgency == 'critical':
+        self.desktop_notice('automatic-' + key, notice.title, notice.body, notice.urgency)
+
+    def desktop_notice(self, key, title, body, urgency='normal'):
+        if self.backend.name == 'win32':
+            def worker():
+                try:
+                    self.backend.notify(title, body, urgency)
+                except Exception as error:
+                    GLib.idle_add(self.show_notice, str(error))
+            threading.Thread(target=worker, daemon=True).start()
+            return
+        notification = Gio.Notification.new(title)
+        notification.set_body(body)
+        if urgency == 'critical':
             notification.set_priority(Gio.NotificationPriority.HIGH)
-        self.send_notification('automatic-' + key, notification)
+        self.send_notification(key, notification)
 
     def flush_automatic_notice(self, key, from_timer=False):
         timer = self.automatic_notice_timers.pop(key, None)
@@ -704,14 +716,14 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
         self.release_manual_job(key)
         self.history(None, latest=True)
         self.show_notice(status)
-        notification = Gio.Notification.new('ClamAV検査終了')
+        title = 'ClamAV検査終了'
         from .mailboxes import MAILBOX_NOTE
         if MAILBOX_NOTE in status:
-            notification.set_title('メール保存ファイル内で脅威を検出しました')
-            notification.set_body('複数のメールをまとめた形式です。ファイル自体は削除せず、メールアプリで確認してください。詳細は検査ログをご覧ください。')
+            title = 'メール保存ファイル内で脅威を検出しました'
+            body = '複数のメールをまとめた形式です。ファイル自体は削除せず、メールアプリで確認してください。詳細は検査ログをご覧ください。'
         else:
-            notification.set_body(status.splitlines()[0])
-        self.send_notification('scan-result', notification)
+            body = status.splitlines()[0]
+        self.desktop_notice('scan-result', title, body)
         return False
 
 

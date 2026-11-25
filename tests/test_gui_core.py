@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from clam_gui.platforms import get_backend
 import subprocess
 import tempfile
 import threading
@@ -38,8 +39,8 @@ class ScannerTests(CoreTestCase):
             store = Store(root)
             cancel = threading.Event()
             cancel.set()
-            with patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), \
-                 patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as popen:
+            with patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'), \
+                 patch.object(type(get_backend()), 'spawn_scanner') as popen:
                 process = popen.return_value
                 process.wait.side_effect = [subprocess.TimeoutExpired('scan', .2), -15]
                 status, _ = scan(root, store, cancel, Path(root)/'lock')
@@ -57,15 +58,15 @@ class ScannerTests(CoreTestCase):
         import fcntl
         with tempfile.TemporaryDirectory() as root:
             path = Path(root)/'lock'
-            with path.open('a') as lock, patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as run, \
-                 patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'):
+            with path.open('a') as lock, patch.object(type(get_backend()), 'spawn_scanner') as run, \
+                 patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'):
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 with self.assertRaisesRegex(ValueError, '別の検査'):
                     scan(root, Store(root), lock_path=path)
                 run.assert_not_called()
 
     def test_missing_target_does_not_run(self):
-        with tempfile.TemporaryDirectory() as root, patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as run:
+        with tempfile.TemporaryDirectory() as root, patch.object(type(get_backend()), 'spawn_scanner') as run:
             with self.assertRaises(ValueError):
                 scan(root + '/missing', Store(root))
             run.assert_not_called()
@@ -82,8 +83,8 @@ class ProfileTests(CoreTestCase):
             rows = Store(root).profiles()
             self.assertEqual([key for key, _ in rows], [first, second])
             self.assertEqual(rows[0][1].label, 'ホーム改訂')
-            self.assertEqual(rows[0][1].excluded_dirs, [root+'/cache'])
-            self.assertEqual(rows[1][1].excludes, [root+'/secret.txt'])
+            self.assertEqual(rows[0][1].excluded_dirs, [str(Path(root)/'cache')])
+            self.assertEqual(rows[1][1].excludes, [str(Path(root)/'secret.txt')])
 
     def test_reject_invalid_exclusions(self):
         from clam_gui.core import Plan
@@ -95,8 +96,8 @@ class ProfileTests(CoreTestCase):
     def test_directory_exclusion_arguments_have_boundaries(self):
         from clam_gui.core import Plan
         with tempfile.TemporaryDirectory() as root:
-            with patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), \
-                 patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as popen:
+            with patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'), \
+                 patch.object(type(get_backend()), 'spawn_scanner') as popen:
                 popen.return_value.wait.return_value = 0
                 scan(Plan('試験', [root], [root+'/a.txt'], True, [root+'/cache']),
                      Store(root), lock_path=Path(root)/'lock')
@@ -179,7 +180,7 @@ class SingleFolderTests(CoreTestCase):
                 with self.subTest(targets=targets):
                     with self.assertRaises(ValueError):
                         store.save_profile(plan)
-                    with patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as process:
+                    with patch.object(type(get_backend()), 'spawn_scanner') as process:
                         with self.assertRaises(ValueError):
                             scan(plan, store, lock_path=Path(root)/'lock')
                         process.assert_not_called()
@@ -222,8 +223,8 @@ class PhishingPreferenceTests(CoreTestCase):
             store = Store(root)
             for enabled in (False, True):
                 store.set_phishing(enabled)
-                with patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), \
-                     patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as popen:
+                with patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'), \
+                     patch.object(type(get_backend()), 'spawn_scanner') as popen:
                     popen.return_value.wait.return_value = 0
                     scan(Plan('test', [root], [], not enabled), store, lock_path=Path(root)/'lock')
                     args = popen.call_args.args[0]
@@ -239,9 +240,9 @@ class ScannerLimitTests(CoreTestCase):
         with tempfile.TemporaryDirectory() as root:
             store = Store(root)
             store.set_scan_preferences(store.scan_options(), {'max-filesize': 256, 'max-scansize': 512})
-            with patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), \
+            with patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'), \
                  patch('clam_gui.core.supported_options', return_value=set(DEFAULTS) | set(LIMITS)), \
-                 patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner') as process:
+                 patch.object(type(get_backend()), 'spawn_scanner') as process:
                 process.return_value.wait.return_value = 0
                 _, output = scan(Plan('test', [root], []), store, lock_path=Path(root)/'lock')
                 args = process.call_args.args[0]

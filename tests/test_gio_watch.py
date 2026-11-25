@@ -78,7 +78,12 @@ class GioWatchTests(unittest.TestCase):
 
     def test_recursive_setup_excludes_subtree_and_does_not_follow_symlink(self):
         (self.folder/'child').mkdir();(self.folder/'excluded').mkdir()
-        (self.folder/'link').symlink_to(self.root/'data',target_is_directory=True)
+        try:
+            (self.folder/'link').symlink_to(self.root/'data',target_is_directory=True)
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows symlink privilege unavailable")
+            raise
         plan=replace(self.plan,excluded_dirs=[str(self.folder/'excluded')])
         self.engine.configure([('watch',plan)],False);self.source.configure([('watch',plan)])
         self.wait(lambda:self.source.idle is None)

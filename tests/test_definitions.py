@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from clam_gui.definitions import DefinitionUpdater, UpdateTracker
 
@@ -63,6 +64,21 @@ class DefinitionTests(unittest.TestCase):
         self.assertEqual(elevated, [['/usr/bin/pkexec', '/usr/bin/systemctl', 'kill',
             '--kill-whom=main', '--signal=SIGUSR1', 'clamav-freshclam.service']])
         self.assertIn('--after-cursor=old-3', system.calls[3])
+
+    def test_scheduled_check_reuses_recent_completed_service_cycle(self):
+        recent = rows(COMPLETE, 'recent')
+        for row in recent:
+            row['__REALTIME_TIMESTAMP'] = str(int(time.time() * 1_000_000))
+        system = FakeSystem([recent])
+        message, _ = self.updater(system).update(scheduled=True)
+        self.assertIn('1時間以内', message)
+        self.assertFalse(any('kill' in cmd for cmd in system.calls))
+
+    def test_scheduled_check_after_long_shutdown_requests_new_cycle(self):
+        system = FakeSystem([rows(COMPLETE, 'old'), rows(COMPLETE, 'new')])
+        message, _ = self.updater(system).update(scheduled=True, timeout=3)
+        self.assertIn('取得・更新を確認', message)
+        self.assertTrue(any('kill' in cmd and '--no-ask-password' in cmd for cmd in system.calls))
 
     def test_running_download_is_observed_without_starting_another_updater(self):
         system = FakeSystem([rows(COMPLETE[:2], 'old'), rows(COMPLETE[2:], 'new')])

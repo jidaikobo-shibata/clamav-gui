@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 import unittest
 from clam_gui.core import Plan, Store
@@ -59,7 +60,7 @@ class ScheduleTests(unittest.TestCase):
             service, timer = manager.paths(key)
             self.assertIn('OnCalendar=Tue *-*-* 12:30:00', timer.read_text())
             self.assertIn('Persistent=true', timer.read_text())
-            self.assertIn('"--data-dir" "' + str(store.path.parent) + '"', service.read_text())
+            self.assertIn('"--data-dir" "' + str(store.path.parent).replace(chr(92), chr(92)*2) + '"', service.read_text())
             self.assertIn(('enable', '--now', timer.name), calls)
             self.assertEqual(read_schedule(store, key), schedule)
             manager.apply(key, Schedule())
@@ -95,10 +96,11 @@ class ScheduleTests(unittest.TestCase):
                 manager.apply(key, Schedule(True))
             self.assertEqual(calls, [])
             self.assertEqual(manager.paths(key)[0].read_text(), 'human-owned')
-            admin = store.save_profile(Plan('system', ['/'], [], False, [], True))
+            admin = store.save_profile(Plan('system', [Path(root).anchor], [], False, [], True))
             with self.assertRaises(ValueError):
                 manager.apply(admin, Schedule(True))
 
+    @unittest.skipUnless(shutil.which("systemd-analyze"), "requires systemd-analyze")
     def test_systemd_accepts_calendar(self):
         for schedule in [Schedule(True), Schedule(True, 'weekly'), Schedule(True, 'weekly', weekdays=[0, 3]), Schedule(True, 'weekly', weekdays=list(range(7))), Schedule(True, 'monthly')]:
             result = subprocess.run(['systemd-analyze', 'calendar', schedule.calendar()],
@@ -128,10 +130,10 @@ class ScheduledRunnerTests(unittest.TestCase):
             save_schedule(store, key, Schedule(True))
             with patch('sys.argv', ['runner', '--data-dir', root, '--profile', key]), \
                  patch('scripts.run_scheduled.scan', side_effect=ValueError('別の検査が実行中です')), \
-                 patch('clam_gui.platforms.linux.LinuxBackend.notify') as notify:
+                 patch('scripts.run_scheduled.get_backend') as backend:
                 self.assertEqual(main(), 2)
-                notify.assert_called_once()
-                self.assertEqual(notify.call_args.args[2], 'critical')
+                backend.return_value.notify.assert_called_once()
+                self.assertEqual(backend.return_value.notify.call_args.args[-1], 'critical')
             self.assertIn('別の検査', store.recent()[0][2])
 
 
@@ -226,6 +228,7 @@ class ShortScheduleTests(unittest.TestCase):
             self.assertEqual(old.calendar(), '*-*-* 02:00:00')
             self.assertEqual(old.interval_minutes, 5)
 
+    @unittest.skipUnless(shutil.which("systemd-analyze"), "requires systemd-analyze")
     def test_hourly_calendar_is_accepted_by_systemd(self):
         result = subprocess.run(['systemd-analyze', 'calendar', Schedule(True, 'hourly', minute=17).calendar()],
                                 capture_output=True, text=True)

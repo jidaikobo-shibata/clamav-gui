@@ -1,4 +1,5 @@
 from pathlib import Path
+from clam_gui.platforms import get_backend
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -48,7 +49,12 @@ class MailboxTests(unittest.TestCase):
             path = Path(root)/'mailbox'
             path.write_bytes(MBOX)
             link = Path(root)/'link'
-            link.symlink_to(path)
+            try:
+                link.symlink_to(path)
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314:
+                    self.skipTest("Windows symlink privilege unavailable")
+                raise
             self.assertFalse(is_mbox(link))
 
     def test_scan_saves_guidance_and_count_of_files(self):
@@ -61,9 +67,9 @@ class MailboxTests(unittest.TestCase):
                 process = unittest.mock.Mock()
                 process.wait.return_value = 1
                 return process
-            with patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), \
+            with patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'), \
                  patch('clam_gui.core.supported_options', return_value=set(DEFAULTS) | {'max-filesize', 'max-scansize'}), \
-                 patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner', side_effect=fake_scan):
+                 patch.object(type(get_backend()), 'spawn_scanner', side_effect=fake_scan):
                 status, output = scan(Plan('test', [root], []), store, lock_path=Path(root)/'lock')
             self.assertIn(MAILBOX_NOTE, status)
             self.assertIn('保存ファイル：1件', status)

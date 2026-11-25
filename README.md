@@ -1,6 +1,6 @@
 # clamav-gui
 
-ClamAVを利用するデスクトップGUIです。Ubuntu版を開発中で、macOS・Windowsへの対応を予定しています。
+ClamAVを利用するデスクトップGUIです。Ubuntu版とWindows 11 x64版を開発しています。macOS版は移植予定です。
 ClamAV本体と定義ファイルは同梱せず、端末に導入されているClamAVを利用します。
 CiscoまたはClamAVプロジェクトの公式アプリではありません。
 
@@ -15,6 +15,29 @@ CiscoまたはClamAVプロジェクトの公式アプリではありません。
 
 検出ファイルの自動削除・隔離は行いません。管理者権限を使った全体検査は未対応です。
 開発版のため、実デスクトップでの通知表示・復帰時の予定実行は継続検証が必要です。
+
+## Windows 11 x64で使う
+
+1. 配布ZIP（またはリポジトリ）をすべて展開し、今後も使うフォルダーに置きます。初回は `Setup-Windows.cmd` をダブルクリックしてください。Windows Package Manager（winget）がMSYS2を導入し、pacmanがUCRT64版のPython・GTK 4・PyGObjectを準備します。既存のMSYS2が標準の `C:\msys64` 以外にある場合は、環境変数 `MSYS2_ROOT` で指定してください。
+2. GUIの「☰」→「ClamAVの管理」からClamAVをインストールします。Windows Package Managerの `Cisco.ClamAV` を使用します。続けて「今すぐ更新を確認」を押し、定義の取得完了を待ちます。
+3. 左側の「＋」から検査プランを追加し、「今すぐ検査」を押します。2回目以降は `ClamAV-GUI.cmd` をダブルクリックします。
+
+ClamAV 本体は通常どおり `winget upgrade` で更新できます。初回導入時には `clamscan.exe` と `freshclam.exe` の両方が起動することを確認します。更新後に DLL 不足が表示され、Windows が再起動を求めている場合は、再起動後にもう一度検査してください。
+
+プラン・ログ・設定は `%LOCALAPPDATA%\clamav-gui\history.sqlite3`、定義は同じ Windows ユーザーの `%LOCALAPPDATA%\ClamAV\database` に保存します。Thunderbird と併用する場合は先にアドオンを更新し、FreshClam を直接呼ぶ既存タスクを停止して、GUI の定期更新を有効にしてください。両アプリは検査時に `%LOCALAPPDATA%\ClamAV\freshclam.lock` の先頭 1 バイトを共有取得し、更新時は排他取得します。旧 GUI の定義は初回更新と読み込み検証の成功まで検査に使用でき、切り替え後も元のフォルダーに残ります。既存のFreshClam設定は保持します。定期検査・毎時の定義更新・ログオン時の常駐監視は現在のユーザーのタスクとして個別に設定できます。間隔指定の検査は前回完了から指定時間が経過した後、次の1分単位の確認時に開始します。取り外し可能ドライブはWindowsが `DRIVE_REMOVABLE` と報告したものを対象にします。
+
+**解除・再導入**　予定・自動更新・常駐監視を画面で無効にしてから、ClamAVの管理画面で本体を削除できます。設定と履歴を再利用するにはユーザーデータを保持してください。フォルダーを移動するときは先に各タスクを無効にし、移動後に再登録してください。MSYS2は他のソフトウェアでも使用するため、不要になった場合だけWindowsの「インストールされているアプリ」から削除します。
+
+GUIはWTFPL v2です。GTK 4とPyGObject（LGPL）、Python（PSFライセンス）、ClamAV（GPL）はそれぞれの配布元から取得します。このリポジトリは各ランタイムと定義を同梱しません。[PyGObjectのWindows導入手順](https://pygobject.gnome.org/getting_started.html#windows)
+
+配布ZIPはリポジトリ直下で `python scripts/package_windows.py` を実行すると `dist` に生成されます。
+
+開発用のWindows実機検証はUCRT64のPythonで実行します。スモーク検証は導入済みエンジンと取得済みの定義を使い、一時フォルダー内の無害なファイルを検査します。`--gui` は画面を表示し、`--schedule` と `--monitor` はテスト専用タスクを登録して終了時に解除します。
+
+```powershell
+& C:\msys64\ucrt64\bin\python.exe -X utf8 -m unittest discover -s tests -v
+& C:\msys64\ucrt64\bin\python.exe -X utf8 scripts/smoke_windows.py --gui --schedule --monitor
+```
 
 ## Ubuntuでの開発
 
@@ -68,7 +91,7 @@ GUIを閉じても動作しますが、ログアウト中や電源オフ中の�
 
 ## 他OSへの移植
 
-macOS・Windowsではまだ動作確認していません。Linux向けの依存箇所と分担案は
+OS固有の実装と移植時の仕様は、
 macOSは[CONTRIBUTING.md](CONTRIBUTING.md)、Windowsは[Windows担当Codexへの依頼](docs/WINDOWS_HANDOFF.md)を参照してください。
 
 ## ライセンス
@@ -188,7 +211,7 @@ GUIを開き直しても定期実行中の状態を確認でき、中止は検�
 記録にあるPIDへ直接シグナルを送る方式は使いません。
 Ubuntuではプロセスの開始識別情報と起動識別情報を照合し、終了・再起動・PID再利用後の記録を実行中と扱いません。
 旧版で開始済みの検査や他アプリ・既存cronが直接開始したClamAVの状態は対象外です。
-macOS/Windowsでは実行状態の確認方法の移植が必要です。既存のプランID・予定・履歴は維持します。
+Windows版はプロセス作成時刻で実行個体を識別します。macOSでは移植が必要です。既存のプランID・予定・履歴は維持します。
 
 ## 検査を開始できなかった場合
 
@@ -214,6 +237,8 @@ macOS/Windowsでは実行状態の確認方法の移植が必要です。既存�
 標準保存先の空でないcvd/cld/cudのうち最新のファイル更新日時を端末の現地時刻で表示し、更新確認だけを行った時刻とは区別します。未取得・確認不能も表示します。
 自動更新の状態を表示するボタンから「定義ファイルの更新設定」を開き、既存のFreshClamサービスの設定・手動更新を操作できます。
 インストール・削除の操作はメインメニューの「ClamAVの管理」にあります。
+
+定期検査では、過去1時間以内に定義の更新確認が成功し、必要な定義ファイルがそろっていれば、そのまま検査を開始します。それ以外は検査前に更新を確認します。更新できなかった場合は、その理由を検査履歴に残し、手元の定義で検査を試みます。定義が3日を超えて古い場合は、従来どおり検査不完了になります。
 
 ## 定義ファイルの自動更新設定（Ubuntu）
 
@@ -309,7 +334,7 @@ Ubuntuでは検査の子プロセスのCPU優先度を下げ、利用可能な�
 
 開発検証用の `python3 scripts/smoke_monitor.py` は、一時データ・模擬スキャナーを使って
 GUIや実サービスなしの監視・停止・再起動後の変更検査を確認します。
-Ubuntuの常駐監視は実装済みですが、macOS/Windowsの常駐起動は未対応です。
+Windowsの常駐起動はログオン時のタスク、Ubuntuはユーザーsystemdを使います。macOSの常駐起動は未対応です。
 
 ユーザーサービスのセッション連携は、[systemdのgraphical-session.targetの仕様](https://www.freedesktop.org/software/systemd/man/latest/systemd.special.html#graphical-session.target)を参照しています。
 

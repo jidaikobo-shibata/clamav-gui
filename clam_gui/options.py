@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import re
 import os
 import subprocess
+from .engine import startup_error
 
 
 @dataclass(frozen=True)
@@ -41,9 +42,9 @@ DEFAULTS = {option.key: option.default for option in OPTIONS}
 
 def help_text(binary):
     result = subprocess.run([binary, '--help'], capture_output=True, text=True, timeout=10,
-                            env={**os.environ, 'LC_ALL': 'C'})
+                            env={**os.environ, 'LC_ALL': 'C'}, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     if result.returncode:
-        raise ValueError('ClamAVの対応オプションを確認できません。')
+        raise ValueError(startup_error(result.returncode) or 'ClamAVの対応オプションを確認できません。')
     return result.stdout
 
 

@@ -7,6 +7,7 @@ import json
 import sqlite3
 import time
 from .platforms import get_backend
+from .engine import executable
 from .automation import Automation, MEDIA_ID, signature, SIGNATURE_VERSION
 from .background import Lease, watched_plans, preference, put_preference, monitor_revision
 from gi.repository import GLib
@@ -279,7 +280,7 @@ class Monitor:
         self.outbox.pump()
         statuses = {key: self.engine.status(key) for key in self.engine.plans}
         statuses[MEDIA_ID] = self.engine.status(MEDIA_ID)
-        if not __import__('shutil').which('clamscan'):
+        if not executable():
             statuses = {key: 'ClamAV未導入：検査待ちを保持しています' for key in statuses}
         if self.command_error:
             statuses[MEDIA_ID] += '\n' + self.command_error

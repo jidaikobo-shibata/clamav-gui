@@ -22,7 +22,7 @@ def exec_arg(value):
 def render_entry(source, python='/usr/bin/python3'):
     source = Path(source).resolve()
     project = Path(__file__).resolve().parents[1]
-    text = (source/'clam_gui/__main__.py').read_text()
+    text = (source/'clam_gui/__main__.py').read_text(encoding='utf-8')
     match = re.search(r"application_id=['\"]([A-Za-z0-9_.-]+)['\"]", text)
     if not match:
         raise ValueError('Application ID was not found')
@@ -45,7 +45,7 @@ def install(source, data_home=None):
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() or destination.is_symlink():
         raise FileExistsError('Existing launcher was left unchanged: ' + str(destination))
-    with destination.open('x') as file:
+    with destination.open('x', encoding='utf-8') as file:
         file.write(content)
     return destination
 

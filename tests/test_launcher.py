@@ -10,7 +10,7 @@ class LauncherTests(unittest.TestCase):
         name, text = render_entry(root)
         self.assertEqual(name, 'com.jidaikobo.ClamAVGui.desktop')
         self.assertIn('Terminal=false', text)
-        self.assertIn('scripts/launch_gui.py', text)
+        self.assertIn(exec_arg(str(root/'scripts/launch_gui.py')), text)
         self.assertNotIn('sh -c', text)
         self.assertNotIn('Autostart', text)
 
@@ -18,10 +18,10 @@ class LauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             source = Path(__file__).resolve().parents[1]
             path = install(source, root)
-            content = path.read_text()
+            content = path.read_text(encoding='utf-8')
             with self.assertRaises(FileExistsError):
                 install(source, root)
-            self.assertEqual(path.read_text(), content)
+            self.assertEqual(path.read_text(encoding='utf-8'), content)
 
     def test_escaping_and_newlines(self):
         value = exec_arg('/tmp/a b%"$')

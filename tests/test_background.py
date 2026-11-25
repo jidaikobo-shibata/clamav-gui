@@ -88,7 +88,12 @@ class BackgroundTests(unittest.TestCase):
         self.assertEqual(self.service.path.read_text(), 'human configuration')
         self.service.path.unlink()
         target=self.root/'outside';target.write_text('keep')
-        self.service.path.symlink_to(target)
+        try:
+            self.service.path.symlink_to(target)
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows symlink privilege unavailable")
+            raise
         with self.assertRaises(ValueError):self.service.apply(False)
         self.assertEqual(target.read_text(),'keep')
         self.run.assert_not_called()

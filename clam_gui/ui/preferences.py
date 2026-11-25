@@ -2,7 +2,7 @@
 import gi
 gi.require_version('Gtk', '4.0')
 import threading
-import shutil
+from ..engine import executable
 from gi.repository import GLib, Gtk
 from ..core import engine_status
 from ..jobs import start_worker
@@ -194,7 +194,7 @@ class PreferencesWindow:
         box.append(row)
         def check_support():
             try:
-                binary = shutil.which('clamscan')
+                binary = executable()
                 if not binary:
                     raise ValueError('ClamAVが見つかりません。')
                 available = supported_options(binary)

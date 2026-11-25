@@ -8,7 +8,7 @@ import re
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-import shutil
+from .engine import executable, startup_error
 import sqlite3
 import subprocess
 from .retention import DEFAULTS as AUTOMATION_DEFAULTS, validate as validate_automation, prune, initialize as initialize_retention
@@ -23,14 +23,15 @@ from .options import DEFAULTS, supported_options, option_arguments, describe_opt
 
 
 def engine_status():
-    binary = shutil.which('clamscan')
+    binary = executable()
     if not binary:
         return 'ClamAVが見つかりません。OS側への導入が必要です。'
     try:
         result = subprocess.run([binary, '--version'], capture_output=True,
-                                text=True, timeout=10)
+                                text=True, timeout=10,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         return (result.stdout.strip() if result.returncode == 0 else
-                'ClamAVの確認に失敗しました。')
+                startup_error(result.returncode) or 'ClamAVの確認に失敗しました。')
     except (OSError, subprocess.TimeoutExpired):
         return 'ClamAVを起動・確認できません。'
 
@@ -40,7 +41,7 @@ class Store:
         if directory is not None:
             base = Path(directory)
         else:
-            data = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share')))
+            data = Path(os.environ.get('XDG_DATA_HOME', os.environ['LOCALAPPDATA'] if os.name == 'nt' else str(Path.home() / '.local/share')))
             base = data / 'clamav-gui'
             legacy = data / 'clam-gui'
             # Preserve existing installations without copying or replacing data.
@@ -517,7 +518,16 @@ def persist_result(store, plan, started, status, output, profile_id, *, administ
     return status, output
 
 
-def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None, available=None, wait=False, can_start=None, administrator=False):
+def _exclude_pattern(path):
+    if os.name == 'nt':
+        # clamscan matches directories as supplied and files by long path.
+        spellings = dict.fromkeys((Path(path).as_posix(), Path(path).resolve().as_posix()))
+        patterns = [r'[/\\]'.join(re.escape(part) for part in name.split('/')) for name in spellings]
+        return '(' + '|'.join(patterns) + ')'
+    return re.escape(os.path.normpath(str(path)))
+
+
+def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None, available=None, wait=False, can_start=None, administrator=False, check_definitions=False):
     plan = target if isinstance(target, Plan) else Plan('フォルダー検査', [Path(target).absolute()], [])
     plan = store.effective_plan(plan)
     cancel = cancel if cancel is not None else threading.Event()
@@ -534,7 +544,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             raise ValueError('監視による検査ファイルは1〜50件で指定してください。')
         if any(not allowed_file(plan, path) for path in files):
             raise ScanFilesChanged('監視対象のファイルが消失・変更されたか、検査範囲外です。')
-    binary = shutil.which('clamscan')
+    binary = executable()
     if not binary:
         raise ValueError('ClamAVが見つかりません。')
     started = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
@@ -543,6 +553,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = get_backend().lock(lock_path)
     result_ready = False
+    definition_lock = None
     try:
         with track_scan(store, profile_id, started, phase='waiting' if wait else 'running', lane=lane,
                         deduplicate=True) as running:
@@ -565,6 +576,25 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                     raise ScanBusyError('別の検査が実行中です。') from None
                 cancel.wait(.5)
             # Recheck the target after a potentially long wait, before starting ClamAV.
+            definition_note = ''
+            if check_definitions:
+                from .definitions import CHECK_TIMEOUT
+
+                class UpdateCancellation:
+                    def is_set(self):
+                        return cancel.is_set() or running.cancelled() or (can_start is not None and not can_start())
+
+                update_cancel = UpdateCancellation()
+                try:
+                    definition_note, _ = get_backend().updater().update(
+                        cancel=update_cancel, timeout=CHECK_TIMEOUT, scheduled=True, restore_stopped=True)
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                    definition_note = '定義の更新を確認できませんでした。' + str(error)
+                if update_cancel.is_set():
+                    reason = '定義確認中に検査が取り消されたか、予定が変更されました。'
+                    status = ScanStatus(reason, ResultKind.CANCELLED, started_at=started)
+                    store.save(started, plan.describe(), status, reason, profile_id)
+                    return status, reason
             validate_profile(plan)
             started = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
             running.started(started)
@@ -576,11 +606,22 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                        '--follow-file-symlinks=0', '--follow-dir-symlinks=0',
                        '--heuristic-alerts=yes', '--alert-exceeds-max=yes',
                        '--fail-if-cvd-older-than=3']
+            if os.name == 'nt':
+                from .engine import database
+                from .platforms.windows_process import DefinitionLock
+                folder = database()
+                definition_lock = DefinitionLock(folder, shared=True)
+                if not definition_lock.acquire():
+                    message = '検査未実行：定義の更新完了後に再試行してください。'
+                    status = ScanStatus(message, ResultKind.INCOMPLETE, started_at=started)
+                    store.save(started, plan.describe(), status, message, profile_id)
+                    return status, message
+                command.append('--database=' + str(folder))
             if plan.kind == 'media':
                 command.append('--cross-fs=no')
             command += arguments
-            command += ['--exclude=^' + re.escape(str(p)) + '$' for p in plan.excludes]
-            command += ['--exclude-dir=^' + re.escape(os.path.normpath(str(p))) + r'(/|$)'
+            command += ['--exclude=^' + _exclude_pattern(p) + '$' for p in plan.excludes]
+            command += ['--exclude-dir=^' + _exclude_pattern(p) + (r'([/\\]|$)' if os.name == 'nt' else r'(/|$)')
                         for p in plan.excluded_dirs]
             command += ['--'] + [str(p) for p in (files if files is not None else plan.targets)]
             # Drain the pipe while scanning; neither disk output nor memory grows unbounded.
@@ -651,6 +692,8 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                 status += '\n複数のメールをまとめて保存できる形式です。'
                 status += '\n保存ファイル自体は削除せず、メールアプリで確認してください。'
                 output += '\n\n' + mailbox_guidance(findings)
+            if definition_note:
+                output += '\n\n--- 検査前の定義確認 ---\n' + definition_note
             output += '\n\n--- この検査で使用した設定 ---\n' + describe_options(settings, supported)
             output += '\n' + describe_limits(limits)
             output += '\n検査上限の警告・ヒューリスティック警告: 有効（固定）\n'
@@ -665,4 +708,6 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             raise
         return storage_warning(status, output, error)
     finally:
+        if definition_lock:
+            definition_lock.close()
         lock.close()

@@ -1,4 +1,5 @@
 """Execution lanes and request outcomes shared by scanners and process state."""
+import os
 from pathlib import Path
 
 FULL = 'full'
@@ -27,4 +28,6 @@ def lane_for(plan, files=None):
 
 
 def lock_path(lane):
-    return Path.home()/'.clamdlog'/('clamscan-events.lock' if lane == EVENT else 'clamscan.lock')
+    base = (Path(os.environ.get('XDG_DATA_HOME') or os.environ['LOCALAPPDATA'])/'clamav-gui'
+            if os.name == 'nt' else Path.home()/'.clamdlog')
+    return base/('clamscan-events.lock' if lane == EVENT else 'clamscan.lock')

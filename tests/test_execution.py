@@ -26,7 +26,7 @@ plan = dict(store.profiles())[key]
 if mode=='media':
     from dataclasses import replace
     plan=replace(plan,kind='media')
-with patch('clam_gui.core.shutil.which',return_value=str(Path(root)/'scanner')), patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)):
+with patch('clam_gui.core.executable',return_value=str(Path(root)/'scanner')), patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)):
     if mode == 'scheduled':
         from scripts.run_scheduled import main
         sys.argv=['runner','--data-dir',str(Path(root)/'data'),'--profile',key]
