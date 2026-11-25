@@ -20,6 +20,43 @@ handle = wintypes.HANDLE
 pointer = ctypes.c_void_p
 dword = wintypes.DWORD
 close = api('CloseHandle', wintypes.BOOL, handle)
+
+
+class Overlapped(ctypes.Structure):
+    _fields_ = [('internal', ctypes.c_size_t), ('internal_high', ctypes.c_size_t),
+                ('offset', dword), ('offset_high', dword), ('event', handle)]
+
+
+lock_file = api('LockFileEx', wintypes.BOOL, handle, dword, dword, dword, dword,
+                ctypes.POINTER(Overlapped))
+
+
+class DefinitionLock:
+    def __init__(self, folder, *, shared):
+        self.path = folder.parent/'freshclam.lock'
+        self.shared = shared
+        self.file = None
+
+    def acquire(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            stream = self.path.open('rb' if self.shared else 'a+b')
+        except FileNotFoundError:
+            stream = self.path.open('a+b')
+        flags = 1 if self.shared else 3  # FAIL_IMMEDIATELY, optionally EXCLUSIVE_LOCK
+        if lock_file(msvcrt.get_osfhandle(stream.fileno()), flags, 0, 1, 0, ctypes.byref(Overlapped())):
+            self.file = stream
+            return True
+        error = ctypes.get_last_error()
+        stream.close()
+        if error == 33:  # ERROR_LOCK_VIOLATION
+            return False
+        raise ctypes.WinError(error)
+
+    def close(self):
+        if self.file:
+            self.file.close()
+            self.file = None
 open_process = api('OpenProcess', handle, dword, wintypes.BOOL, dword)
 times = api('GetProcessTimes', wintypes.BOOL, handle, pointer, pointer, pointer, pointer)
 wait = api('WaitForSingleObject', dword, handle, dword)

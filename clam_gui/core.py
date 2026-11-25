@@ -389,6 +389,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
     lock_path = Path(lock_path) if lock_path else default_lock_path(lane)
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = get_backend().lock(lock_path)
+    definition_lock = None
     try:
         with track_scan(store, profile_id, started, phase='waiting' if wait else 'running', lane=lane,
                         deduplicate=True) as running:
@@ -442,7 +443,15 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                        '--fail-if-cvd-older-than=3']
             if os.name == 'nt':
                 from .engine import database
-                command.append('--database=' + str(database()))
+                from .platforms.windows_process import DefinitionLock
+                folder = database()
+                definition_lock = DefinitionLock(folder, shared=True)
+                if not definition_lock.acquire():
+                    message = '検査未実行：定義の更新完了後に再試行してください。'
+                    status = ScanStatus(message, ResultKind.INCOMPLETE, started_at=started)
+                    store.save(started, plan.describe(), status, message, profile_id)
+                    return status, message
+                command.append('--database=' + str(folder))
             if plan.kind == 'media':
                 command.append('--cross-fs=no')
             command += arguments
@@ -500,4 +509,6 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             store.save(started, plan.describe(), status, output, profile_id)
             return status, output
     finally:
+        if definition_lock:
+            definition_lock.close()
         lock.close()

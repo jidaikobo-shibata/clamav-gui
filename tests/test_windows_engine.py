@@ -13,18 +13,17 @@ from clam_gui.platforms import windows_engine as engine
 class EngineSetupTests(unittest.TestCase):
     def test_scheduled_check_shares_only_successful_checks(self):
         from clam_gui.platforms.windows import Updates
-        with tempfile.TemporaryDirectory() as root:
-            folder = Path(root)/'database'
-            folder.mkdir()
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, LOCALAPPDATA=root):
+            folder = Path(root)/'ClamAV'/'database'
+            folder.mkdir(parents=True)
             for name in ('daily', 'main', 'bytecode'):
                 (folder/(name+'.cvd')).write_bytes(b'fixture')
             with patch('clam_gui.platforms.windows.executable', return_value='freshclam'), \
-                 patch('clam_gui.platforms.windows.database', return_value=folder), \
                  patch('clam_gui.platforms.windows_process.JobProcess') as job:
                 job.return_value.wait.return_value = 0
                 Updates().update()
                 Updates().update(scheduled=True)
-                self.assertEqual(job.call_count, 1)
+                self.assertEqual(job.call_count, 2)  # FreshClam and initial load check
                 marker = folder.parent/'freshclam-success'
                 old = time.time() - 3 * 86400
                 os.utime(marker, (old, old))
@@ -34,7 +33,38 @@ class EngineSetupTests(unittest.TestCase):
                 self.assertAlmostEqual(marker.stat().st_mtime, old, places=4)
                 job.return_value.wait.return_value = 0
                 Updates().update(scheduled=True)
-                self.assertEqual(job.call_count, 3)
+                self.assertEqual(job.call_count, 4)
+
+    def test_failed_migration_keeps_legacy_until_verified_retry(self):
+        from clam_gui.engine import database, legacy_database, shared_database
+        from clam_gui.platforms.windows import Updates
+        from clam_gui.platforms.windows_process import DefinitionLock
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, LOCALAPPDATA=root), \
+             patch('clam_gui.platforms.windows.executable', side_effect=lambda name: name), \
+             patch('clam_gui.platforms.windows_process.JobProcess') as job:
+            legacy = legacy_database()
+            legacy.mkdir(parents=True)
+            for name in ('daily', 'main', 'bytecode'):
+                (legacy/(name+'.cld')).write_bytes(b'fixture')
+            shared = shared_database()
+            reader = DefinitionLock(shared, shared=True)
+            self.assertTrue(reader.acquire())
+            try:
+                with self.assertRaises(ValueError):
+                    Updates().update()
+                job.assert_not_called()
+            finally:
+                reader.close()
+            job.return_value.wait.side_effect = [0, 0, 2, 2]
+            with self.assertRaises(RuntimeError):
+                Updates().update()
+            self.assertEqual(database(), legacy)
+            self.assertFalse(shared.exists())
+            job.return_value.wait.side_effect = None
+            job.return_value.wait.return_value = 0
+            Updates().update(scheduled=True)
+            self.assertEqual(database(), shared)
+            self.assertEqual((shared/'daily.cld').read_bytes(), (legacy/'daily.cld').read_bytes())
 
     def test_setup_checks_both_programs(self):
         with patch.object(engine, 'executable', side_effect=lambda name: name + '.exe'), \

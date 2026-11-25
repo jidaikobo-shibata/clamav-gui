@@ -3,13 +3,14 @@ import datetime
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import time
 import xml.etree.ElementTree as ET
 
-from ..definitions import AutoUpdateState, CHECK_INTERVAL, definition_update_label
-from ..engine import database, executable, startup_error
+from ..definitions import AutoUpdateState, CHECK_INTERVAL, CHECK_TIMEOUT, definition_update_label
+from ..engine import database, definitions_present, executable, legacy_database, shared_database, startup_error
 from ..notifications import definition_status
 from .windows_tasks import Scheduler, Task, trigger_for
 
@@ -56,59 +57,96 @@ class Packages:
 
 class Updates:
     def update(self, cancel=None, progress=None, scheduled=False, timeout=None, **kwargs):
-        from .windows_process import FileLock, JobProcess
+        from .windows_process import DefinitionLock, JobProcess
         binary = executable('freshclam')
         if not binary:
             raise ValueError('FreshClamが見つかりません。')
-        folder = database()
-        folder.mkdir(exist_ok=True, parents=True)
-        lock = FileLock(folder.parent/'freshclam.lock')
+        folder = shared_database()
+        lock = DefinitionLock(folder, shared=False)
+        ready = folder.parent/'gui-definitions-ready'
         marker = folder.parent/'freshclam-success'
         deadline = time.monotonic() + timeout if timeout is not None else None
+        lock_deadline = deadline or (time.monotonic() + CHECK_TIMEOUT)
+
         def interrupted():
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError('定義更新の待機時間を超えました。')
             return cancel and cancel.is_set()
 
-        while not lock.acquire():
-            if not scheduled:
-                raise ValueError('定義ファイルを更新中です。')
-            if interrupted():
-                return '定義更新を中止しました。', ''
-            time.sleep(0.5)
-        try:
-            def files_present():
-                return all(any(path.is_file() and path.stat().st_size > 0
-                               for path in (folder/(name+'.cvd'), folder/(name+'.cld')))
-                           for name in ('daily', 'main', 'bytecode'))
+        def acquire(definition_lock):
+            while not definition_lock.acquire():
+                if not scheduled:
+                    raise ValueError('検査または定義更新が実行中です。終了後に再試行してください。')
+                if interrupted():
+                    return False
+                if time.monotonic() >= lock_deadline:
+                    raise TimeoutError('定義更新の待機時間を超えました。')
+                time.sleep(0.5)
+            return True
 
+        if not acquire(lock):
+            return '定義更新を中止しました。', ''
+        try:
             if interrupted():
                 return '定義更新を中止しました。', ''
-            if scheduled and marker.is_file() and 0 <= time.time() - marker.stat().st_mtime < CHECK_INTERVAL and files_present():
+            if scheduled and ready.is_file() and marker.is_file() and 0 <= time.time() - marker.stat().st_mtime < CHECK_INTERVAL and definitions_present(folder):
                 return '1時間以内に定義の更新確認が成功しています。', ''
             with tempfile.TemporaryDirectory(dir=folder.parent) as tmp, tempfile.TemporaryFile() as log:
+                target = folder
+                if not ready.is_file() and (not folder.exists() or not any(folder.iterdir())):
+                    target = Path(tmp)/'database'
+                    target.mkdir()
+                    legacy = legacy_database()
+                    if definitions_present(legacy):
+                        source_lock = DefinitionLock(legacy, shared=True)
+                        if not acquire(source_lock):
+                            return '定義更新を中止しました。', ''
+                        try:
+                            for source in legacy.iterdir():
+                                if source.is_file():
+                                    shutil.copy2(source, target/source.name)
+                        finally:
+                            source_lock.close()
+                target.mkdir(exist_ok=True, parents=True)
                 config = Path(tmp)/'freshclam.conf'
                 config.write_text('DatabaseMirror database.clamav.net\n', encoding='ascii')
-                cmd = [binary, '--config-file=' + str(config), '--datadir=' + str(folder), '--stdout']
-                p = JobProcess(cmd, stdout=log, stderr=subprocess.STDOUT)
-                try:
-                    while True:
-                        try:
-                            code = p.wait(0.5)
-                            break
-                        except subprocess.TimeoutExpired:
-                            if interrupted():
-                                return '定義更新を中止しました。', ''
-                finally:
-                    p.terminate()
-                    p.wait()
+                commands = [[binary, '--config-file=' + str(config), '--datadir=' + str(target), '--stdout']]
+                if not ready.is_file():
+                    scanner = executable('clamscan')
+                    if not scanner:
+                        raise ValueError('定義の確認に必要なclamscanが見つかりません。')
+                    probe = Path(tmp)/'probe.txt'
+                    probe.write_bytes(b'ClamAV database load check\n')
+                    commands.append([scanner, '--database=' + str(target), '--fail-if-cvd-older-than=3', str(probe)])
+                for cmd in commands:
+                    if interrupted():
+                        return '定義更新を中止しました。', ''
+                    p = JobProcess(cmd, stdout=log, stderr=subprocess.STDOUT)
+                    try:
+                        while True:
+                            try:
+                                code = p.wait(0.5)
+                                break
+                            except subprocess.TimeoutExpired:
+                                if interrupted():
+                                    return '定義更新を中止しました。', ''
+                    finally:
+                        p.terminate()
+                        p.wait()
+                    if code:
+                        break
                 size = log.seek(0, 2)
                 log.seek(max(0, size - 65536))
                 output = log.read().decode('utf-8', errors='replace')
                 if code:
-                    raise RuntimeError(startup_error(code) or output or f'FreshClam終了コード {code}')
-                if not files_present():
+                    raise RuntimeError(startup_error(code) or output or f'{Path(cmd[0]).name} 終了コード {code}')
+                if not definitions_present(target):
                     raise RuntimeError('更新後の定義ファイルを確認できません。')
+                if target != folder:
+                    if folder.exists():
+                        folder.rmdir()  # Only replace an empty destination.
+                    target.rename(folder)
+                ready.touch()
                 marker.touch()
                 return '定義ファイルの更新確認が完了しました。', output
         finally:

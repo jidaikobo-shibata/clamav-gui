@@ -20,5 +20,24 @@ def executable(name='clamscan'):
     return shutil.which(name)
 
 
-def database():
+def shared_database():
+    return Path(os.environ['LOCALAPPDATA']) / 'ClamAV' / 'database'
+
+
+def legacy_database():
     return Path(os.environ['LOCALAPPDATA']) / 'clamav-gui' / 'database'
+
+
+def definitions_present(folder):
+    return all(any(path.is_file() and path.stat().st_size > 0
+                   for path in (folder/(name+'.cvd'), folder/(name+'.cld')))
+               for name in ('daily', 'main', 'bytecode'))
+
+
+def database():
+    shared = shared_database()
+    if not (shared.parent/'gui-definitions-ready').is_file():
+        legacy = legacy_database()
+        if definitions_present(legacy):
+            return legacy
+    return shared
