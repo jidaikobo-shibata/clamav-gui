@@ -26,11 +26,11 @@ plan = dict(store.profiles())[key]
 if mode=='media':
     from dataclasses import replace
     plan=replace(plan,kind='media')
-with patch('clam_gui.core.executable',return_value=str(Path(root)/'scanner')), patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)):
+with patch('clam_gui.core.executable',return_value=str(Path(root)/'scanner')), patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)), patch('clam_gui.definitions.daily_definition_age', return_value=0):
     if mode == 'scheduled':
         from scripts.run_scheduled import main
         sys.argv=['runner','--data-dir',str(Path(root)/'data'),'--profile',key]
-        with patch('clam_gui.platforms.linux.LinuxBackend.notify'):
+        with patch('clam_gui.platforms.linux.LinuxBackend.notify'), patch('clam_gui.definitions.DefinitionUpdater.update', return_value=('test update', '')):
             raise SystemExit(main())
     try:
         status, output = scan(plan, store, profile_id=key, wait=True,

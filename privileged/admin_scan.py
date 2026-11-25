@@ -53,7 +53,7 @@ def arguments(request):
         raise ValueError('展開後の合計上限が小さすぎます。')
     args = ['/usr/bin/clamscan', '--recursive', '--suppress-ok-results',
         '--follow-file-symlinks=0', '--follow-dir-symlinks=0', '--cross-fs=no',
-        '--heuristic-alerts=yes', '--alert-exceeds-max=yes', '--fail-if-cvd-older-than=3',
+        '--heuristic-alerts=yes', '--alert-exceeds-max=yes',
         '--database=/var/lib/clamav']
     args += ['--' + k + '=' + ('yes' if settings[k] else 'no') for k in sorted(settings)]
     args += [f'--{k}={v}M' for k, v in limits.items() if v is not None]

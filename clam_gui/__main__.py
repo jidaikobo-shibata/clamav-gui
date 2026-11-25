@@ -740,7 +740,13 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
             body = '複数のメールをまとめた形式です。ファイル自体は削除せず、メールアプリで確認してください。詳細は検査ログをご覧ください。'
         else:
             body = status.splitlines()[0]
-        self.desktop_notice('scan-result', title, body)
+        if '定義の鮮度に注意：' in status:
+            body = str(status)
+            if not status.startswith('検出あり'):
+                title = 'ClamAV 要確認：定義の鮮度'
+            self.desktop_notice('scan-result', title, body, 'critical')
+        else:
+            self.desktop_notice('scan-result', title, body)
         return False
 
 

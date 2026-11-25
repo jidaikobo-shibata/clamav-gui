@@ -39,7 +39,7 @@ def live_update(data):
                 process_identity(data.get('pid', -1)) == data['identity'])
 
 
-def run_update(cancel=None, root=None):
+def run_update(cancel=None, root=None, timeout=None):
     root = Path(root) if root else mac_data_directory()
     backend = MacSetup(root)
     stop = cancel or threading.Event()
@@ -60,7 +60,11 @@ def run_update(cancel=None, root=None):
             state = backend.inspect()
             if not state.engine or not state.configuration:
                 raise SetupError('アプリを開いてClamAVの準備を完了してください。自動でインストーラーは開きません。')
-            backend.prepare(stop, force_update=True)
+            if timeout is None:
+                backend.prepare(stop, force_update=True)
+            else:
+                with backend.locked():
+                    backend.update_definitions(stop, lambda *_: None, timeout=timeout)
             data.update(state='completed', message='検査用データの更新確認が完了しました。')
         except SetupCancelled as error:
             data.update(state='cancelled', message=str(error))

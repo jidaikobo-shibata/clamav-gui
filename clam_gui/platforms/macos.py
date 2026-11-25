@@ -17,6 +17,9 @@ class MacBackend:
     lock = staticmethod(FileLock)
     process_identity = staticmethod(process_identity)
 
+    def updater(self):
+        return MacScheduledUpdater()
+
     def packages(self):
         return self
 
@@ -44,3 +47,24 @@ class MacBackend:
         from ..macos_notifications import send
         if not send(title, body):
             raise RuntimeError('macOSの通知を送れませんでした。')
+
+
+class MacScheduledUpdater:
+    def update(self, cancel=None, timeout=180, **kwargs):
+        from ..macos_update import MacAutoUpdateService, read_update, run_update
+        from ..paths import mac_data_directory
+        from ..definitions import CHECK_INTERVAL, daily_definition_age
+        from ..engine import definitions_present
+        import time
+        root = mac_data_directory()
+        data = read_update(root)
+        if data and data.get('state') == 'completed' and 0 <= time.time() - data.get('finished', 0) < CHECK_INTERVAL and definitions_present(database_directory()) and daily_definition_age(database_directory()) is not None:
+            return '1時間以内に定義の更新確認が成功しています。', ''
+        service = MacAutoUpdateService(root)
+        if service.status().enabled:
+            return service.update(cancel=cancel, timeout=timeout), ''
+        run_update(cancel=cancel, root=root, timeout=timeout)
+        data = read_update(root)
+        if not data or data.get('state') != 'completed':
+            raise ValueError((data or {}).get('message', '定義更新の完了を確認できませんでした。'))
+        return data['message'], ''

@@ -107,7 +107,7 @@ from scripts.run_scheduled import main
 root, scanner, key = sys.argv[1:]
 os.environ['HOME'] = root
 sys.argv = ['runner', '--data-dir', root+'/data', '--profile', key]
-with patch('clam_gui.core.executable', return_value=scanner), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|set(LIMITS)), patch('scripts.run_scheduled.subprocess.run', return_value=SimpleNamespace(returncode=0)), patch('scripts.run_scheduled.definition_status', return_value='test definitions'):
+with patch('clam_gui.core.executable', return_value=scanner), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|set(LIMITS)), patch('scripts.run_scheduled.subprocess.run', return_value=SimpleNamespace(returncode=0)), patch('scripts.run_scheduled.definition_status', return_value='test definitions'), patch('clam_gui.definitions.DefinitionUpdater.update', return_value=('test update', '')), patch('clam_gui.definitions.daily_definition_age', return_value=0):
     raise SystemExit(main())
 """
             child = subprocess.Popen([sys.executable, '-c', code, directory, str(scanner), key],

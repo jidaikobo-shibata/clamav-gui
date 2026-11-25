@@ -204,3 +204,21 @@ class MacJobsTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MacScheduledUpdaterTests(unittest.TestCase):
+    def test_recent_success_reuses_check_and_old_success_uses_updater(self):
+        from clam_gui.platforms.macos import MacScheduledUpdater
+        import time
+        with patch('clam_gui.macos_update.read_update') as state, \
+             patch('clam_gui.engine.definitions_present', return_value=True), \
+             patch('clam_gui.definitions.daily_definition_age', return_value=0), \
+             patch('clam_gui.macos_update.MacAutoUpdateService') as service:
+            state.return_value = {'state':'completed', 'finished':time.time()}
+            self.assertIn('1時間以内', MacScheduledUpdater().update()[0])
+            service.assert_not_called()
+            state.return_value['finished'] -= 7200
+            service.return_value.status.return_value.enabled = True
+            service.return_value.update.return_value = 'updated'
+            self.assertEqual(MacScheduledUpdater().update(timeout=42), ('updated',''))
+            service.return_value.update.assert_called_once_with(cancel=None, timeout=42)

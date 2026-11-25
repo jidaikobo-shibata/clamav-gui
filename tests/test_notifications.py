@@ -29,10 +29,10 @@ class NotificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             self.assertIn('確認できません', definition_status(root, now))
             path = Path(root)/'daily.cld'
-            path.touch()
+            path.write_text(f"ClamAV-VDB:date:1:1:1:md5:signature:builder:{int(now.timestamp())}")
             self.assertIn('正常', definition_status(root, now))
             old = now.timestamp() - 5*86400
-            os.utime(path, (old, old))
+            path.write_text(f"ClamAV-VDB:date:1:1:1:md5:signature:builder:{int(old)}")
             self.assertIn('古い可能性', definition_status(root, now))
 
     def test_mailbox_notification_explains_unit_without_private_details(self):

@@ -133,21 +133,21 @@ class Store:
     def profile_history(self, key, plan):
         with self.connect() as db:
             return db.execute('SELECT started, target, status, output FROM scans '
-                              'WHERE profile_id=? OR (profile_id IS NULL AND target=?) '
-                              'ORDER BY rowid DESC LIMIT 100', (key, plan.describe())).fetchall()
+                              'WHERE profile_id=? OR (profile_id IS NULL AND target IN (?,?)) '
+                              'ORDER BY rowid DESC LIMIT 100', (key, *plan.history_descriptions())).fetchall()
 
     def history_entries(self, key, plan):
         with self.connect() as db:
             rows = db.execute('SELECT rowid, started, completed_at, detected, target, status, output, result_kind '
-                              'FROM scans WHERE profile_id=? OR (profile_id IS NULL AND target=?) '
-                              'ORDER BY rowid DESC LIMIT 100', (key, plan.describe())).fetchall()
+                              'FROM scans WHERE profile_id=? OR (profile_id IS NULL AND target IN (?,?)) '
+                              'ORDER BY rowid DESC LIMIT 100', (key, *plan.history_descriptions())).fetchall()
         return [HistoryEntry(*row) for row in rows]
 
     def history_headers(self, key, plan):
         # Fetch at most 100 IDs from each indexed branch, then only small fields.
         with self.connect() as db:
             modern = db.execute('SELECT rowid FROM scans WHERE profile_id=? ORDER BY rowid DESC LIMIT 100', (key,)).fetchall()
-            legacy = db.execute('SELECT rowid FROM scans WHERE profile_id IS NULL AND target=? ORDER BY rowid DESC LIMIT 100', (plan.describe(),)).fetchall()
+            legacy = db.execute('SELECT rowid FROM scans WHERE profile_id IS NULL AND target IN (?,?) ORDER BY rowid DESC LIMIT 100', plan.history_descriptions()).fetchall()
             ids = sorted({row[0] for row in modern + legacy}, reverse=True)[:100]
             if not ids:
                 return []
@@ -183,8 +183,8 @@ class Store:
     def history_entry(self, ident, key, plan):
         with self.connect() as db:
             row = db.execute('SELECT rowid,started,completed_at,detected,target,status,output,result_kind '
-                             'FROM scans WHERE rowid=? AND (profile_id=? OR (profile_id IS NULL AND target=?))',
-                             (ident, key, plan.describe())).fetchone()
+                             'FROM scans WHERE rowid=? AND (profile_id=? OR (profile_id IS NULL AND target IN (?,?)))',
+                             (ident, key, *plan.history_descriptions())).fetchone()
         return HistoryEntry(*row) if row else None
 
     def scan_options(self):
@@ -406,6 +406,8 @@ class HistoryEntry:
     def attention_label(self):
         if self.is_detected():
             return '検出あり'
+        if '定義の鮮度に注意：' in self.status:
+            return '要確認・定義の鮮度'
         return '要確認・内訳不明' if self.is_uncertain() else ''
 
     def attention_notice(self):
@@ -428,6 +430,10 @@ class Plan:
     watch_recursive: bool = True
     limits: dict | None = None
 
+    def history_descriptions(self):
+        current = self.describe()
+        return current, current.replace('定義が3日より古い場合は警告して検査を続行。', '定義が3日より古ければ停止。')
+
     def describe(self, include_policy=True):
         lines = [self.label, '対象:'] + [str(p) for p in self.targets]
         if self.kind == 'watch':
@@ -438,7 +444,7 @@ class Plan:
             lines += ['除外（フォルダー配下すべて）:'] + [str(p) for p in self.excluded_dirs]
         if include_policy:
             lines += ['フィッシング検査: ' + ('有効' if self.phishing else '無効（既存設定を継承）'),
-                  'サイズ上限・暗号化は警告として報告。定義が3日より古ければ停止。',
+                  'サイズ上限・暗号化は警告として報告。定義が3日より古い場合は警告して検査を続行。',
                   '削除・隔離は行いません。通常ユーザーで検査します。']
         if self.requires_admin:
             lines.append('旧設定：管理者権限用のプランです。編集画面で「通常ユーザーで検査する」を選ぶと実行できます。')
@@ -589,11 +595,15 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                     def is_set(self):
                         return cancel.is_set() or running.cancelled() or (can_start is not None and not can_start())
 
+                    def wait(self, seconds):
+                        cancel.wait(seconds)
+                        return self.is_set()
+
                 update_cancel = UpdateCancellation()
                 try:
                     definition_note, _ = get_backend().updater().update(
                         cancel=update_cancel, timeout=CHECK_TIMEOUT, scheduled=True, restore_stopped=True)
-                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                except Exception as error:
                     definition_note = '定義の更新を確認できませんでした。' + str(error)
                 if update_cancel.is_set():
                     reason = '定義確認中に検査が取り消されたか、予定が変更されました。'
@@ -609,8 +619,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             arguments = option_arguments(settings, supported) + limit_arguments(limits, supported)
             command = [binary, '--recursive', '--suppress-ok-results',
                        '--follow-file-symlinks=0', '--follow-dir-symlinks=0',
-                       '--heuristic-alerts=yes', '--alert-exceeds-max=yes',
-                       '--fail-if-cvd-older-than=3']
+                       '--heuristic-alerts=yes', '--alert-exceeds-max=yes']
             if os.name == 'nt':
                 from .engine import database
                 from .platforms.windows_process import DefinitionLock
@@ -622,6 +631,10 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                     store.save(started, plan.describe(), status, message, profile_id)
                     return status, message
                 command.append('--database=' + str(folder))
+            from .definitions import daily_definition_age, freshness_warning
+            from .paths import database_directory
+            definition_dir = folder if os.name == 'nt' else database_directory()
+            age = daily_definition_age(definition_dir)
             if plan.kind == 'media':
                 command.append('--cross-fs=no')
             if sys.platform == 'darwin':
@@ -699,6 +712,13 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                 status += '\n複数のメールをまとめて保存できる形式です。'
                 status += '\n保存ファイル自体は削除せず、メールアプリで確認してください。'
                 output += '\n\n' + mailbox_guidance(findings)
+            warning = freshness_warning(age)
+            if warning:
+                result = assess(status, output)
+                kind = ResultKind.WARNING if result.kind == ResultKind.CLEAN else result.kind
+                headline = '確認が必要です：定義の鮮度に注意' if result.kind == ResultKind.CLEAN else str(status)
+                status = ScanStatus(headline + '\n' + warning + ('\n使用した定義では脅威は見つかりませんでした。' if result.kind == ResultKind.CLEAN else ''), kind, result.detected)
+            output += '\n\n--- 検査開始時の定義の鮮度 ---\n' + (warning or f'日次定義の作成から{age/86400:.2f}日')
             if definition_note:
                 output += '\n\n--- 検査前の定義確認 ---\n' + definition_note
             output += '\n\n--- この検査で使用した設定 ---\n' + describe_options(settings, supported)

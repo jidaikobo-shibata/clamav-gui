@@ -13,6 +13,35 @@ CHECK_INTERVAL = 3600
 CHECK_TIMEOUT = 180
 
 
+FRESHNESS_WARNING = '定義の鮮度に注意：'
+
+
+def daily_definition_age(directory, now=None):
+    """Use the daily database build epoch, not filesystem modification time."""
+    now = time.time() if now is None else now
+    candidates = []
+    for suffix in ('cld', 'cvd'):
+        try:
+            with (Path(directory)/('daily.' + suffix)).open('rb') as file:
+                fields = file.read(512).decode('ascii').strip().split(':')
+            if fields[0] != 'ClamAV-VDB':
+                continue
+            version, stamp = int(fields[2]), int(fields[8])
+            if version > 0 and 0 < stamp <= now:
+                candidates.append((version, stamp))
+        except (OSError, UnicodeError, ValueError, IndexError):
+            continue
+    return now - max(candidates)[1] if candidates else None
+
+
+def freshness_warning(age):
+    if age is None:
+        return FRESHNESS_WARNING + '定義ファイルの作成日時を確認できません。定義を更新して再検査してください。'
+    if age > 3 * 86400:
+        return FRESHNESS_WARNING + f'古い定義ファイル（{age/86400:.1f}日前）で検査しました。最新の脅威を検出できない可能性があります。定義を更新して再検査してください。'
+    return ''
+
+
 def definition_update_label(directory=Path('/var/lib/clamav')):
     """Local database modification time, never the last update-check time."""
     try:

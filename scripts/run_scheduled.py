@@ -44,7 +44,7 @@ def main(argv=None, cancel=None):
     output = ''
     try:
         status, output = execute_scan(plan, store, cancel, scanner=scan, profile_id=args.profile,
-                                      wait=True, check_definitions=sys.platform == "win32", can_start=lambda: read_schedule(store, args.profile).enabled and
+                                      wait=True, check_definitions=True, can_start=lambda: read_schedule(store, args.profile).enabled and
                                       dict(store.profiles()).get(args.profile) == plan)
     except ScanAlreadyQueued as error:
         print(str(error))

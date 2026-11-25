@@ -134,3 +134,21 @@ class DefinitionTests(unittest.TestCase):
         self.assertTrue(tracker.complete())
         tracker.feed('ClamAV update process started at next')
         self.assertFalse(tracker.complete())
+
+
+class DailyDefinitionFreshnessTests(unittest.TestCase):
+    def test_build_epoch_and_version_not_modification_time(self):
+        from clam_gui.definitions import daily_definition_age, freshness_warning
+        with tempfile.TemporaryDirectory() as root:
+            now = 1800000000
+            Path(root, 'daily.cvd').write_text(f'ClamAV-VDB:date:1:1:1:md5:sig:builder:{now-86400}')
+            Path(root, 'daily.cld').write_text(f'ClamAV-VDB:date:2:1:1:md5:sig:builder:{now-5*86400}')
+            self.assertEqual(daily_definition_age(root, now), 5*86400)
+            self.assertIn('古い定義', freshness_warning(daily_definition_age(root, now)))
+            self.assertFalse(freshness_warning(3*86400))
+            self.assertTrue(freshness_warning(3*86400+1))
+            Path(root, 'daily.cld').write_text('invalid')
+            self.assertEqual(daily_definition_age(root, now), 86400)
+            Path(root, 'daily.cvd').unlink()
+            self.assertIsNone(daily_definition_age(root, now))
+            self.assertIn('確認できません', freshness_warning(None))

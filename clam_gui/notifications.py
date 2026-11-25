@@ -11,16 +11,11 @@ from .paths import database_directory
 
 def definition_status(directory=None, now=None):
     directory = Path(directory) if directory is not None else database_directory()
-    try:
-        dates = [path.stat().st_mtime for pattern in ('*.cvd', '*.cld', '*.cud')
-                 for path in Path(directory).glob(pattern)]
-        if not dates:
-            return '定義ファイル：状態を確認できませんでした'
-        now = now or datetime.datetime.now().astimezone()
-        days = max(0, int((now.timestamp() - max(dates)) / 86400))
-        return f'定義ファイル：{"古い可能性があります" if days > 3 else "正常"}（{days}日前）'
-    except OSError:
+    from .definitions import daily_definition_age
+    age = daily_definition_age(directory, now.timestamp() if now else None)
+    if age is None:
         return '定義ファイル：状態を確認できませんでした'
+    return f'定義ファイル：{"古い可能性があります" if age > 3*86400 else "正常"}（{age/86400:.1f}日前）'
 
 
 def scan_notification(label, status, output, started, finished, definitions):
@@ -29,6 +24,8 @@ def scan_notification(label, status, output, started, finished, definitions):
         title, urgency = 'ClamAV 検査完了', 'normal'
     elif assess(status, output).detected:
         title, urgency = 'ClamAV 検出報告', 'critical'
+    elif '定義の鮮度に注意：' in status:
+        title, urgency = 'ClamAV 要確認：定義の鮮度', 'critical'
     else:
         title, urgency = 'ClamAV 検査不完了', 'critical'
     if MAILBOX_NOTE in status:
