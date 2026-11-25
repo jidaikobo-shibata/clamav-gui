@@ -50,7 +50,7 @@ class PlanLimitTests(unittest.TestCase):
         target = self.root/'document'
         target.write_text('test')
         self.plan.limits = {'max-filesize': 512, 'max-scansize': 1024}
-        with patch('clam_gui.core.shutil.which', return_value=str(scanner)), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|set(LIMITS)):
+        with patch('clam_gui.core.executable', return_value=str(scanner)), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|set(LIMITS)):
             for event in (False, True):
                 self.plan.kind = 'watch' if event else 'scheduled'
                 kwargs = dict(files=[str(target)]) if event else {}

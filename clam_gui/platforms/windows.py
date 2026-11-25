@@ -183,6 +183,17 @@ class Background:
     def supported(self):
         return True
 
+    def reconcile(self):
+        from ..background import requested, enabled, heartbeat
+        from ..runtime import activities
+        want = requested(self.store)
+        if want == enabled(self.store) and (not want or heartbeat(self.store)):
+            return '自動検査：稼働中' if want else '自動検査：無効'
+        if activities(self.store):
+            return '検査完了後に自動検査の状態を変更します。'
+        self.apply(want)
+        return '自動検査の設定を反映しました。'
+
     def apply(self, enable):
         old = self.store.preferences.get('background-enabled', False)
         previous = self.task.control('query')

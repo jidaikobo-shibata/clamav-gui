@@ -146,7 +146,7 @@ else:
         plan = Plan('test', [str(self.root)], [])
         process = Mock()
         process.wait.return_value = 0
-        with patch('clam_gui.admin_scan.spawn', return_value=process), patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|{'max-filesize','max-scansize'}):
+        with patch('clam_gui.admin_scan.spawn', return_value=process), patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|{'max-filesize','max-scansize'}):
             status, output = scan(plan, store, lock_path=self.root/'lock', administrator=True)
         self.assertIn('集計結果が返りません', output)
         self.assertIn('検査不完了', status)
@@ -179,7 +179,7 @@ else:
         class Fake:
             def wait(self, timeout=None): return 126
             def poll(self): return 126
-        with patch('clam_gui.admin_scan.spawn', return_value=Fake()) as spawn, patch('clam_gui.core.shutil.which', return_value='/usr/bin/clamscan'), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|{'max-filesize','max-scansize'}):
+        with patch('clam_gui.admin_scan.spawn', return_value=Fake()) as spawn, patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|{'max-filesize','max-scansize'}):
             status, output = scan(plan, store, lock_path=self.root/'lock', administrator=True)
         self.assertIn('認証がキャンセル', output)
         self.assertIn('管理者権限による手動検査', store.recent()[0][1])

@@ -21,7 +21,7 @@ class OutputAuditTests(unittest.TestCase):
         self.store=Store(self.root/'data');self.plan=Plan('test',[str(self.folder)],[])
 
     def scan_with(self,spawn):
-        with patch('clam_gui.core.shutil.which',return_value='/mock/clamscan'), \
+        with patch('clam_gui.core.executable',return_value='/mock/clamscan'), \
              patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)), \
              patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner',side_effect=spawn):
             return execute_scan(self.plan,self.store,lock_path=self.root/'lock',profile_id='p')

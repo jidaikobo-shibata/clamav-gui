@@ -100,7 +100,9 @@ def trigger_for(s):
     elif s.frequency == 'weekly':
         week = ET.SubElement(node, 'ScheduleByWeek')
         ET.SubElement(week, 'WeeksInterval').text = '1'
-        ET.SubElement(ET.SubElement(week, 'DaysOfWeek'), ('Monday Tuesday Wednesday Thursday Friday Saturday Sunday'.split())[s.weekday])
+        days = ET.SubElement(week, 'DaysOfWeek')
+        for day in s.selected_weekdays():
+            ET.SubElement(days, ('Monday Tuesday Wednesday Thursday Friday Saturday Sunday'.split())[day])
     else:
         month = ET.SubElement(node, 'ScheduleByMonth')
         ET.SubElement(ET.SubElement(month, 'DaysOfMonth'), 'Day').text = str(s.monthday)

@@ -91,13 +91,13 @@ def guarded(name, globals=None, *args, **kwargs):
 builtins.__import__ = guarded
 import clam_gui.core, clam_gui.background, clam_gui.runtime
 from clam_gui.platforms import get_backend
-backend = get_backend('darwin')
+backend = get_backend('unsupported-test')
 assert backend.process_identity(1) is None
 '''
         subprocess.run([sys.executable, '-c', code], check=True, timeout=5)
 
     def test_unsupported_platform_does_not_fall_back_to_linux(self):
-        backend = get_backend('darwin')
+        backend = get_backend('unsupported-test')
         with self.assertRaises(UnsupportedPlatformError):backend.scheduler(None)
         self.assertIsNone(backend.process_identity(1))
 

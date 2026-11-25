@@ -129,6 +129,7 @@ class ScheduledRunnerTests(unittest.TestCase):
             key = store.save_profile(Plan('test', [root], []))
             save_schedule(store, key, Schedule(True))
             with patch('sys.argv', ['runner', '--data-dir', root, '--profile', key]), \
+                 patch('scripts.run_scheduled.sys.platform', 'linux'), \
                  patch('scripts.run_scheduled.scan', side_effect=ValueError('別の検査が実行中です')), \
                  patch('scripts.run_scheduled.get_backend') as backend:
                 self.assertEqual(main(), 2)
@@ -230,6 +231,9 @@ class ShortScheduleTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("systemd-analyze"), "requires systemd-analyze")
     def test_hourly_calendar_is_accepted_by_systemd(self):
+        import shutil
+        if not shutil.which('systemd-analyze'):
+            self.skipTest('systemd-analyze is required for this systemd integration test')
         result = subprocess.run(['systemd-analyze', 'calendar', Schedule(True, 'hourly', minute=17).calendar()],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

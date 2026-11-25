@@ -113,12 +113,16 @@ with patch('clam_gui.core.executable', return_value=scanner), patch('clam_gui.co
             child = subprocess.Popen([sys.executable, '-c', code, directory, str(scanner), key],
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
-                deadline = time.monotonic() + 5
+                # First-time Rosetta interpreter startup can exceed five seconds.
+                deadline = time.monotonic() + 15
                 state = []
                 while time.monotonic() < deadline:
                     state = activities(store)
                     if state:
                         break
+                    if child.poll() is not None:
+                        output, error = child.communicate(timeout=2)
+                        self.fail('Runner exited before publishing state: ' + output + error)
                     time.sleep(.02)
                 self.assertEqual(len(state), 1)
                 self.assertNotEqual(child.pid, os.getpid())

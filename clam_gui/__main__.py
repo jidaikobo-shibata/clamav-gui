@@ -5,6 +5,7 @@ import threading
 import shutil
 import time
 from .engine import executable
+import sys
 import gi
 
 gi.require_version('Gtk', '4.0')
@@ -47,13 +48,14 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
         self.engine_check_pending = False
         self.install_prompt_checked = False
         self.install_prompt = None
+        self.setup_window = None
 
     def do_activate(self):
         if self.get_active_window():
             self.get_active_window().unminimize()
             self.get_active_window().present()
             return
-        window = Gtk.ApplicationWindow(application=self, title='ClamAV GUI — 開発版')
+        window = Gtk.ApplicationWindow(application=self, title='ClamAV GUI' if sys.platform == 'darwin' else 'ClamAV GUI — 開発版')
         window.set_default_size(1160, 680)
         self.window = window
         window.connect('close-request', self.on_close)
@@ -77,11 +79,12 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
         action('preferences', self.preferences)
         action('package-setup', self.package_setup)
         action('quit', self.request_quit)
-        self.set_accels_for_action('app.quit', ['<Control>q'])
+        primary = '<Meta>' if sys.platform == 'darwin' else '<Control>'
+        self.set_accels_for_action('app.quit', [primary + 'q'])
         action('shortcuts', self.show_shortcuts)
         action('about', self.show_about)
-        self.set_accels_for_action('app.preferences', ['<Control>comma'])
-        self.set_accels_for_action('app.shortcuts', ['<Control>question'])
+        self.set_accels_for_action('app.preferences', [primary + 'comma'])
+        self.set_accels_for_action('app.shortcuts', [primary + 'question'])
         self.menu_model = Gio.Menu()
         targets = Gio.Menu()
         targets.append('検査プランを追加…(_N)', 'app.new-target')
@@ -189,6 +192,9 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
             return True
         self.install_prompt_timer = None
         self.install_prompt_checked = True
+        if sys.platform == 'darwin':
+            self.open_mac_setup(only_if_needed=True)
+            return False
         if executable():
             return False
         dialog = Gtk.MessageDialog(application=self, transient_for=self.window, modal=True,
@@ -359,6 +365,8 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
                     description = ('外部メディア接続時' if key == MEDIA_ID else '追加・変更時') + ('（ログイン中）' if background else '（画面を開いている間）')
                 if not schedule.enabled:
                     description += '・停止中'
+                elif sys.platform == 'darwin' and widgets['plan'].kind == 'scheduled' and self.backend.scheduler(self.store).needs_repair(key, schedule):
+                    description += '・再登録が必要'
                 widgets['schedule'].set_text(description)
                 widgets['updating'] = True
                 widgets['switch'].set_active(schedule.enabled)
@@ -505,7 +513,7 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
         self.notice.set_visible(bool(text))
 
     def reconcile_background(self, force=False):
-        if not managed(self.store):
+        if self.backend.name == "darwin" or not managed(self.store):
             return
         desired = requested(self.store)
         now = time.monotonic()
@@ -537,7 +545,7 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
     def configure_automation(self):
         if not hasattr(self, 'automation'):
             return
-        if managed(self.store) or background_enabled(self.store):
+        if self.backend.name != "darwin" and (managed(self.store) or background_enabled(self.store)):
             # Yield all observation to the service; a current scan is allowed to finish.
             self.observers.configure([])
             self.automation.configure([], False)
@@ -561,7 +569,7 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
             if not state:
                 return '常駐監視に接続できません。環境設定で確認してください。'
             return state.get('statuses', {}).get(key, '常駐監視へ設定を反映中…').replace('アプリ起動中のみ', 'ログイン中')
-        if managed(self.store):
+        if self.backend.name != "darwin" and managed(self.store):
             return getattr(self, 'background_status', '自動検査へ設定を反映中…')
         if not self.monitor_lease.file:
             return '別のプロセスが監視しています'
@@ -569,7 +577,7 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
 
     def tick_automation(self):
         self.configure_automation()
-        if not managed(self.store) and not background_enabled(self.store) and self.monitor_lease.file:
+        if (self.backend.name == "darwin" or (not managed(self.store) and not background_enabled(self.store))) and self.monitor_lease.file:
             self.automation.tick(blocked=self.schedule_busy or (self.busy and not self.manual_jobs))
         return True
 
@@ -589,7 +597,7 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
         self.desktop_notice('automatic-' + key, notice.title, notice.body, notice.urgency)
 
     def desktop_notice(self, key, title, body, urgency='normal'):
-        if self.backend.name == 'win32':
+        if self.backend.name in ('win32', 'darwin'):
             def worker():
                 try:
                     self.backend.notify(title, body, urgency)
@@ -602,6 +610,15 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
         if urgency == 'critical':
             notification.set_priority(Gio.NotificationPriority.HIGH)
         self.send_notification(key, notification)
+
+    def open_mac_setup(self, only_if_needed=False):
+        if self.setup_window and not self.setup_window.closed:
+            if not only_if_needed:
+                self.setup_window.present()
+            return self.setup_window
+        from .setup_window import SetupWindow
+        self.setup_window = SetupWindow(self, only_if_needed=only_if_needed)
+        return self.setup_window
 
     def flush_automatic_notice(self, key, from_timer=False):
         timer = self.automatic_notice_timers.pop(key, None)
@@ -740,11 +757,12 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
         window.set_titlebar(header)
         grid = Gtk.Grid(column_spacing=32, row_spacing=18, margin_top=24,
                         margin_bottom=24, margin_start=24, margin_end=24)
+        primary = '<Meta>' if sys.platform == 'darwin' else '<Control>'
         for row, (title, accelerator) in enumerate([
-                ('アプリケーションを終了', '<Control>q'),
+                ('アプリケーションを終了', primary + 'q'),
                 ('メインメニューを開く', 'F10'),
-                ('検査設定を開く', '<Control>comma'),
-                ('ショートカットを表示', '<Control>question'),
+                ('検査設定を開く', primary + 'comma'),
+                ('ショートカットを表示', primary + 'question'),
                 ('この一覧を閉じる', 'Escape')]):
             grid.attach(Gtk.Label(label=title, xalign=0, hexpand=True), 0, row, 1, 1)
             grid.attach(Gtk.ShortcutLabel(accelerator=accelerator), 1, row, 1, 1)
@@ -766,7 +784,7 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
             window.present()
             return
         window = Gtk.AboutDialog(application=self, transient_for=self.operation_parent(),
-                                 modal=True, program_name='ClamAV GUI', version='開発版',
+                                 modal=True, program_name='ClamAV GUI', version='1.0.0' if sys.platform == 'darwin' else '開発版',
                                  comments='ClamAVの検査対象・定期実行・検査履歴を管理します。',
                                  website='https://github.com/jidaikobo-shibata/clamav-gui',
                                  website_label='プロジェクトのページ',

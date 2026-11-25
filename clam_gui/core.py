@@ -13,6 +13,8 @@ import sqlite3
 import subprocess
 from .retention import DEFAULTS as AUTOMATION_DEFAULTS, validate as validate_automation, prune, initialize as initialize_retention
 from .execution import ScanBusyError, ScanAlreadyQueued, ScanFilesChanged, lane_for, lock_path as default_lock_path
+import sys
+from .paths import database_directory, find_clamav
 from .runtime import track_scan
 from .platforms import get_backend
 from .settings import Preferences
@@ -38,6 +40,9 @@ def engine_status():
 
 class Store:
     def __init__(self, directory=None):
+        if directory is None and sys.platform == 'darwin':
+            from .paths import mac_data_directory
+            directory = mac_data_directory()
         if directory is not None:
             base = Path(directory)
         else:
@@ -619,6 +624,8 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                 command.append('--database=' + str(folder))
             if plan.kind == 'media':
                 command.append('--cross-fs=no')
+            if sys.platform == 'darwin':
+                command.append('--database=' + str(database_directory()))
             command += arguments
             command += ['--exclude=^' + _exclude_pattern(p) + '$' for p in plan.excludes]
             command += ['--exclude-dir=^' + _exclude_pattern(p) + (r'([/\\]|$)' if os.name == 'nt' else r'(/|$)')

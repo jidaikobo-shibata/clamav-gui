@@ -26,6 +26,9 @@ def get_backend(system=None):
     if system == 'win32':
         from .windows import WindowsBackend
         return WindowsBackend()
+    if system == 'darwin':
+        from .macos import MacBackend
+        return MacBackend()
     if system.startswith('linux'):
         from .linux import LinuxBackend
         return LinuxBackend()

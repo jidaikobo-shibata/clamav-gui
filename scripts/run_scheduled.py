@@ -17,11 +17,11 @@ from clam_gui.schedule import read_schedule
 from clam_gui.notifications import definition_status, scan_notification
 
 
-def main():
+def main(argv=None, cancel=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--profile', required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     store = Store(args.data_dir)
     plan = dict(store.profiles()).get(args.profile)
     if plan is None:
@@ -36,14 +36,15 @@ def main():
         import time
         if time.time() - store.preferences.get(clock_key, 0) < 60 * schedule.interval_minutes:
             return 0
-    cancel = threading.Event()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: cancel.set())
+    if cancel is None:
+        cancel = threading.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: cancel.set())
     started = datetime.datetime.now().astimezone()
     output = ''
     try:
         status, output = execute_scan(plan, store, cancel, scanner=scan, profile_id=args.profile,
-                                      wait=True, check_definitions=True, can_start=lambda: read_schedule(store, args.profile).enabled and
+                                      wait=True, check_definitions=sys.platform == "win32", can_start=lambda: read_schedule(store, args.profile).enabled and
                                       dict(store.profiles()).get(args.profile) == plan)
     except ScanAlreadyQueued as error:
         print(str(error))
@@ -56,8 +57,13 @@ def main():
     if getattr(status, 'started_at', None):
         started = datetime.datetime.fromisoformat(status.started_at)
     finished = datetime.datetime.now().astimezone()
-    title, body, urgency = scan_notification(plan.label, status, output, started, finished, get_backend().definition_status() if sys.platform == "win32" else definition_status())
+    title, body, urgency = scan_notification(plan.label, status, output, started, finished, get_backend().definition_status() if sys.platform in ("win32", "darwin") else definition_status())
     print(status)
+    if sys.platform == 'darwin':
+        from clam_gui.macos_notifications import send
+        if not send(title, body):
+            print('通知を送れませんでした。アプリの通知設定と検査履歴を確認してください。', file=sys.stderr)
+        return 0 if status.startswith('検査完了') else 2
     try:
         get_backend().notify(title, body, urgency)
     except (OSError, RuntimeError, subprocess.TimeoutExpired):

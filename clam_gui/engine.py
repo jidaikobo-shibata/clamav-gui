@@ -1,4 +1,4 @@
-﻿"""Locate the external engine without adding install directories to PATH."""
+"""Locate the external engine without adding install directories to PATH."""
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +13,10 @@ def startup_error(code):
 
 
 def executable(name='clamscan'):
+    import sys
+    if sys.platform == 'darwin':
+        from .paths import find_clamav
+        return find_clamav(name)
     if os.name == 'nt':
         standard = Path(os.environ['ProgramFiles']) / 'ClamAV' / (name + '.exe')
         if standard.is_file():

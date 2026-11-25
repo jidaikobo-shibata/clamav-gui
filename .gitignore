@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-build/
+.venv-build-intel/
 .codex-private/
 *.sqlite3
 *.sqlite3-*

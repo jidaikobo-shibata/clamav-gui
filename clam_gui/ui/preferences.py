@@ -13,6 +13,9 @@ from ..background import enabled as background_enabled, heartbeat
 
 class PreferencesWindow:
     def background_controls(self, content):
+        if self.backend.name == "darwin":
+            content.append(Gtk.Label(label="macOSのフォルダー監視は画面を開いている間に動作します。定期検査はlaunchdで実行します。", wrap=True, xalign=0))
+            return
         state = Gtk.Label(xalign=0, wrap=True)
         content.append(state)
         content.append(Gtk.Label(label='いずれかを有効にすると、ログイン時から画面を閉じても監視します。ログアウト中は停止します。\n'

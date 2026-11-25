@@ -67,6 +67,8 @@ class PackageWindow:
         start_worker(worker, lambda error: deliver('ClamAV本体：更新状態を確認できません', str(error)))
 
     def package_setup(self, manager=None, updater=None, update_only=False, auto_manager=None):
+        if self.backend.name == "darwin" and manager is None and updater is None and auto_manager is None:
+            return self.open_mac_setup()
         manager = manager or self.backend.packages()
         updater = updater or self.backend.updater()
         auto_manager = auto_manager or self.backend.auto_update()

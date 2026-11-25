@@ -12,7 +12,7 @@ class ScanFailureTests(unittest.TestCase):
         from clam_gui.options import DEFAULTS
         backend = type(get_backend())
         with tempfile.TemporaryDirectory() as root, \
-             patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)), \
+             patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|{"max-filesize", "max-scansize"}), \
              patch('clam_gui.core.executable', return_value='clamscan'), \
              patch.object(backend, 'updater') as updater, \
              patch.object(backend, 'spawn_scanner') as scanner:

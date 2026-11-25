@@ -58,7 +58,7 @@ class MultipleTargetTests(unittest.TestCase):
         scanner = self.root/'scanner'
         scanner.write_text('#!/usr/bin/python3\nimport sys\nprint("ARGS", *sys.argv[1:])\nprint("Infected files: 0")\n')
         scanner.chmod(0o700)
-        with patch('clam_gui.core.shutil.which', return_value=str(scanner)), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|set(LIMITS)):
+        with patch('clam_gui.core.executable', return_value=str(scanner)), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|set(LIMITS)):
             _, output = scan(self.plan, self.store, lock_path=self.root/'scan.lock')
         self.assertIn('-- ' + str(self.a) + ' ' + str(self.b), output)
         self.assertIn(str(self.a) + '\n' + str(self.b), self.store.recent()[0][1])
