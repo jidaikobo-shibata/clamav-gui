@@ -40,9 +40,6 @@ def engine_status():
 
 class Store:
     def __init__(self, directory=None):
-        if directory is None and sys.platform == 'darwin':
-            from .paths import mac_data_directory
-            directory = mac_data_directory()
         if directory is not None:
             base = Path(directory)
         else:

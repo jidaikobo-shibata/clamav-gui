@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -30,10 +31,13 @@ class AdminScanTests(unittest.TestCase):
         self.assertIn('--follow-dir-symlinks=0', args)
         self.assertNotIn('--remove', args)
         self.assertEqual(args[-2:], ['--', str(self.root)])
-        for key, value in [('command', '/bin/sh'), ('version', True), ('targets', ['/dev']),
-                           ('targets', ['--remove']), ('targets', ['/proc/self']),
+        invalid = [('command', '/bin/sh'), ('version', True), ('targets', ['/dev']),
+                           ('targets', ['--remove']),
                            ('options', dict(DEFAULTS, remove=True)),
-                           ('limits', {'max-filesize': True, 'max-scansize': 512})]:
+                           ('limits', {'max-filesize': True, 'max-scansize': 512})]
+        if Path('/proc/self').is_dir():
+            invalid.append(('targets', ['/proc/self']))
+        for key, value in invalid:
             request = deepcopy(self.request)
             request[key] = value
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
@@ -55,11 +59,13 @@ class AdminScanTests(unittest.TestCase):
         self.assertIn('--exclude-dir=^/var/tmp/private(/|$)', args)
         self.assertEqual(args[args.index('--bind')+1:args.index('--bind')+3], ['/var/tmp/private']*2)
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Requires Linux seccomp')
     def test_seccomp_filter_can_be_built_without_elevation(self):
         with tempfile.TemporaryFile() as file:
             filter_bpf(file)
             self.assertTrue(file.read())
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Requires Linux seccomp')
     def test_seccomp_blocks_socket_in_an_unprivileged_child(self):
         code = """import ctypes, socket, tempfile
 from privileged.admin_scan import filter_bpf
@@ -146,7 +152,7 @@ else:
         plan = Plan('test', [str(self.root)], [])
         process = Mock()
         process.wait.return_value = 0
-        with patch('clam_gui.admin_scan.spawn', return_value=process), patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|{'max-filesize','max-scansize'}):
+        with patch('clam_gui.core.sys.platform', 'linux'), patch('clam_gui.admin_scan.spawn', return_value=process), patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|{'max-filesize','max-scansize'}):
             status, output = scan(plan, store, lock_path=self.root/'lock', administrator=True)
         self.assertIn('集計結果が返りません', output)
         self.assertIn('検査不完了', status)
@@ -179,7 +185,7 @@ else:
         class Fake:
             def wait(self, timeout=None): return 126
             def poll(self): return 126
-        with patch('clam_gui.admin_scan.spawn', return_value=Fake()) as spawn, patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|{'max-filesize','max-scansize'}):
+        with patch('clam_gui.core.sys.platform', 'linux'), patch('clam_gui.admin_scan.spawn', return_value=Fake()) as spawn, patch('clam_gui.core.executable', return_value='/usr/bin/clamscan'), patch('clam_gui.core.supported_options', return_value=set(DEFAULTS)|{'max-filesize','max-scansize'}):
             status, output = scan(plan, store, lock_path=self.root/'lock', administrator=True)
         self.assertIn('認証がキャンセル', output)
         self.assertIn('管理者権限による手動検査', store.recent()[0][1])

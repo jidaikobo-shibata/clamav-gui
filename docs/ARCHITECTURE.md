@@ -22,7 +22,9 @@
 `clam_gui/platforms.get_backend()` がOS連携の入口です。
 GUIは `self.backend` を使い、個別のOSサービスを直接構築しません。
 LinuxBackendは既存のAPT・FreshClam・systemd管理を呼び出します。
-WindowsBackendはwinget、FreshClam、タスクスケジューラ、Job Object、GIOのフォルダー監視とリムーバブルドライブ列挙を利用します。実装は `clam_gui/platforms/windows*.py` にあります。macOS向けの選択処理は未実装です。
+WindowsBackendはwinget、FreshClam、タスクスケジューラ、Job Object、GIOのフォルダー監視とリムーバブルドライブ列挙を利用します。実装は `clam_gui/platforms/windows*.py` にあります。
+MacBackendは公式/Homebrew版の検出、専用定義の更新、launchd、ネイティブ通知とlibprocを利用します。実装は `clam_gui/platforms/macos.py` と `macos_*.py` にあります。Macのフォルダー監視はGUI起動中に限定します。
+Macの検査プラン・履歴は従来のXDG保存先（未指定時は `~/.local/share/clamav-gui`）を維持し、定義・FreshClam設定のApplication Supportとは分離します。明示的なStore保存先とXDG_DATA_HOMEは分離検証でも優先します。
 未実装のOSは明示的なエラーを返し、Linuxの管理コマンドへフォールバックしません。
 
 | メソッド | 戻り値・役割 |

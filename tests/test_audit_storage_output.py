@@ -12,6 +12,7 @@ from clam_gui.core import Store,Plan,scan
 from clam_gui.jobs import execute_scan,start_worker
 from clam_gui.options import DEFAULTS,LIMITS
 from clam_gui.scan_output import ScanOutput
+from clam_gui.platforms import get_backend
 
 
 class OutputAuditTests(unittest.TestCase):
@@ -23,7 +24,7 @@ class OutputAuditTests(unittest.TestCase):
     def scan_with(self,spawn):
         with patch('clam_gui.core.executable',return_value='/mock/clamscan'), \
              patch('clam_gui.core.supported_options',return_value=set(DEFAULTS)|set(LIMITS)), \
-             patch('clam_gui.platforms.linux.LinuxBackend.spawn_scanner',side_effect=spawn):
+             patch.object(type(get_backend()), 'spawn_scanner', side_effect=spawn):
             return execute_scan(self.plan,self.store,lock_path=self.root/'lock',profile_id='p')
 
     def found(self,command,**kwargs):

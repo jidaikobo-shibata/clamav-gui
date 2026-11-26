@@ -7,6 +7,23 @@ from clam_gui.core import Store
 
 
 class LegacyDataTests(unittest.TestCase):
+    def test_macos_retains_previous_store_and_respects_xdg_isolation(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch('clam_gui.core.sys.platform', 'darwin'), \
+                patch('clam_gui.core.Path.home', return_value=Path(directory)), \
+                patch.dict(os.environ):
+            os.environ.pop('XDG_DATA_HOME', None)
+            previous = Store(Path(directory) / '.local/share/clamav-gui')
+            previous.save('previous', 'target', '検出なし', 'retained history')
+            current = Store()
+            self.assertEqual(current.path, previous.path)
+            self.assertEqual(current.recent()[0][3], 'retained history')
+            self.assertFalse((Path(directory) / 'Library/Application Support/ClamAV GUI').exists())
+            os.environ['XDG_DATA_HOME'] = str(Path(directory) / 'isolated')
+            isolated = Store()
+            self.assertEqual(isolated.path, Path(directory) / 'isolated/clamav-gui/history.sqlite3')
+            self.assertEqual(isolated.recent(), [])
+
     def test_existing_legacy_database_is_reused_without_copying(self):
         with tempfile.TemporaryDirectory() as directory,patch.dict(os.environ,{'XDG_DATA_HOME':directory}):
             old=Store(Path(directory)/'clam-gui')

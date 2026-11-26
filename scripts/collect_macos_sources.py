@@ -187,9 +187,10 @@ def collect(output):
 
     project = sources / 'Sources/clamav-gui'
     project.mkdir()
-    for name in ('LICENSE', 'README.md', 'CONTRIBUTING.md'):
+    for name in ('LICENSE', 'README.md', 'CONTRIBUTING.md',
+                 'ClamAV-GUI.cmd', 'Setup-Windows.cmd'):
         shutil.copy2(ROOT / name, project / name)
-    for name in ('clam_gui', 'scripts', 'tests', 'assets'):
+    for name in ('clam_gui', 'scripts', 'tests', 'assets', 'privileged', 'docs'):
         shutil.copytree(ROOT / name, project / name,
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.log'))
     (sources / 'SOURCE_MANIFEST.json').write_text(json.dumps(records, ensure_ascii=False, indent=2) + '\n')

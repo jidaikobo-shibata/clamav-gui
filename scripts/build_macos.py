@@ -171,6 +171,13 @@ def build(output):
                 'signing': 'ad-hoc; not notarized', 'purpose': 'macOS release candidate',
                 'clamav': 'download official signed installer on user request',
                 'definitions': 'download using FreshClam on user request', 'components': manifest}
+    revision = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'],
+                              capture_output=True, text=True)
+    if revision.returncode == 0:
+        metadata['source_commit'] = revision.stdout.strip()
+        metadata['source_modified'] = subprocess.run(
+            ['git', '-C', str(ROOT), 'diff', '--quiet', 'HEAD'],
+            capture_output=True).returncode != 0
     (app / 'Contents/Resources/BUILD_INFO.json').write_text(json.dumps(metadata, indent=2) + '\n')
     refresh_loader_cache(output)
     return sign_and_archive(output)

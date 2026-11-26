@@ -14,6 +14,7 @@ class HelperSetupTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
+    @unittest.skipUnless(Path('/usr/bin/dpkg-deb').is_file(), 'Requires the Debian package builder')
     def test_data_only_package_has_exact_files_root_ownership_and_no_scripts(self):
         package = AdminHelperSetup().build(self.root)
         data = subprocess.run(['/usr/bin/dpkg-deb', '--fsys-tarfile', str(package)], capture_output=True, check=True).stdout
@@ -81,7 +82,9 @@ class HelperSetupTests(unittest.TestCase):
 
     def test_unsafe_installation_directory_is_refused_before_changes(self):
         manager = AdminHelperSetup()
-        with patch('clam_gui.packages.AptManager.check_platform'), patch('clam_gui.admin_helper_setup.HELPER', self.root/'helper'):
+        with patch('clam_gui.packages.AptManager.check_platform'), \
+                patch('clam_gui.admin_helper_setup.Path.is_file', return_value=True), \
+                patch('clam_gui.admin_helper_setup.HELPER', self.root/'helper'):
             with self.assertRaisesRegex(ValueError, '安全な設置先'):
                 manager.check_platform()
 
