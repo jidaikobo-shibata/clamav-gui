@@ -21,7 +21,7 @@ class ResultContracts(unittest.TestCase):
         now = datetime.datetime.now()
         title, body, urgency = scan_notification('test', status, '', now, now, '')
         self.assertEqual(urgency, 'normal')
-        self.assertIn('Completed successfully', body)
+        self.assertEqual(body, '検査プラン：test\n検出なし。')
 
     def test_incomplete_detection_and_cancel_are_distinct(self):
         incomplete = summarize(2, '/file: Test-Signature FOUND\nTotal errors: 1')

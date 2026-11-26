@@ -57,7 +57,7 @@ def main(argv=None, cancel=None):
     if getattr(status, 'started_at', None):
         started = datetime.datetime.fromisoformat(status.started_at)
     finished = datetime.datetime.now().astimezone()
-    title, body, urgency = scan_notification(plan.label, status, output, started, finished, get_backend().definition_status() if sys.platform in ("win32", "darwin") else definition_status())
+    title, body, urgency = scan_notification(plan.label, status, output, store=store, key=args.profile)
     print(status)
     if sys.platform == 'darwin':
         from clam_gui.macos_notifications import send

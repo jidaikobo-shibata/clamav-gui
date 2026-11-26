@@ -1,5 +1,5 @@
 """Run with /usr/bin/python3 -m clam_gui."""
-from .notifications import AutomaticNotices
+from .notifications import AutomaticNotices, scan_notification
 from dataclasses import replace
 import threading
 import shutil
@@ -733,20 +733,10 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
         self.release_manual_job(key)
         self.history(None, latest=True)
         self.show_notice(status)
-        title = 'ClamAV検査終了'
-        from .mailboxes import MAILBOX_NOTE
-        if MAILBOX_NOTE in status:
-            title = 'メール保存ファイル内で脅威を検出しました'
-            body = '複数のメールをまとめた形式です。ファイル自体は削除せず、メールアプリで確認してください。詳細は検査ログをご覧ください。'
-        else:
-            body = status.splitlines()[0]
-        if '定義の鮮度に注意：' in status:
-            body = str(status)
-            if not status.startswith('検出あり'):
-                title = 'ClamAV 要確認：定義の鮮度'
-            self.desktop_notice('scan-result', title, body, 'critical')
-        else:
-            self.desktop_notice('scan-result', title, body)
+        plan = dict(self.store.profiles()).get(key)
+        title, body, urgency = scan_notification(plan.label if plan else '検査', status, output,
+                                                 store=self.store, key=key)
+        self.desktop_notice('scan-result', title, body, urgency)
         return False
 
 

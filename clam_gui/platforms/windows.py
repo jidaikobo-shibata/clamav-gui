@@ -270,13 +270,13 @@ $n = New-Object System.Windows.Forms.NotifyIcon
 try {
     $n.Icon = [Drawing.SystemIcons]::Information
     $n.Visible = $true
-    $n.ShowBalloonTip(5000,$env:CLAM_GUI_TITLE,$env:CLAM_GUI_BODY,'Info')
+    $n.ShowBalloonTip(5000,$env:CLAM_GUI_TITLE,$env:CLAM_GUI_BODY,$env:CLAM_GUI_ICON)
     Start-Sleep -Seconds 5
 } finally { $n.Dispose() }
 """
         shell = Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe'
         result = subprocess.run([str(shell), '-NoProfile', '-NonInteractive','-Command',script],
             capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW,
-            env={**os.environ, 'CLAM_GUI_TITLE':title, 'CLAM_GUI_BODY':body})
+            env={**os.environ, 'CLAM_GUI_TITLE':title, 'CLAM_GUI_BODY':body, 'CLAM_GUI_ICON':'Warning' if urgency == 'critical' else 'Info'})
         if result.returncode:
             raise RuntimeError('Windowsの通知を表示できませんでした。')

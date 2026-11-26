@@ -645,6 +645,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                         for p in plan.excluded_dirs]
             command += ['--'] + [str(p) for p in (files if files is not None else plan.targets)]
             # Drain the pipe while scanning; neither disk output nor memory grows unbounded.
+            scan_exit_code = None
             with ScanOutput() as log:
                 process = None
                 try:
@@ -682,6 +683,7 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
                         elif code == 127:
                             output += '\n管理者認証または補助プログラムの起動に失敗しました。'
                     status = summarize(code, output, cancelled)
+                    scan_exit_code = code
                     if log.detected and not status.assessment.detected:
                         status = ScanStatus(str(status), status.assessment.kind, True)
                         status += '\n脅威の検出がありました。省略された出力があるため詳細をすべて表示できません。'
@@ -721,6 +723,8 @@ def scan(target, store, cancel=None, lock_path=None, profile_id=None, files=None
             output += '\n\n--- 検査開始時の定義の鮮度 ---\n' + (warning or f'日次定義の作成から{age/86400:.2f}日')
             if definition_note:
                 output += '\n\n--- 検査前の定義確認 ---\n' + definition_note
+            if scan_exit_code is not None:
+                output += f'\n\n--- 検査終了情報 ---\nClamAV exit code: {scan_exit_code}\n'
             output += '\n\n--- この検査で使用した設定 ---\n' + describe_options(settings, supported)
             output += '\n' + describe_limits(limits)
             output += '\n検査上限の警告・ヒューリスティック警告: 有効（固定）\n'
