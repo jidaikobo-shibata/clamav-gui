@@ -13,8 +13,9 @@ from .background import Lease, watched_plans, preference, put_preference, monito
 from gi.repository import GLib
 
 
-def notify(title, body, urgency='normal'):
-    get_backend().notify(title, body, urgency)
+def notify(title, body, urgency='normal', *, target=''):
+    backend = get_backend()
+    backend.notify(title, body, urgency, **({'target': target} if target and backend.name == 'linux' else {}))
 
 
 class Checkpoints:

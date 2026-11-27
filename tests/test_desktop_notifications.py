@@ -19,6 +19,15 @@ class DesktopNotificationTests(unittest.TestCase):
         self.assertNotIn('default-action', payload)  # GNOME activates the application.
         self.assertEqual(args[-2], 10000)
 
+    def test_notification_uses_typed_action_target(self):
+        connection = Mock()
+        target = '["plan","0123456789abcdef0123456789abcdef"]'
+        with patch.object(Gio, 'bus_get_sync', return_value=connection):
+            send('result', 'details', 'critical', target=target)
+        payload = connection.call_sync.call_args.args[4].unpack()[2]
+        self.assertEqual(payload['default-action'], 'app.open-result')
+        self.assertEqual(payload['default-action-target'], target)
+
     def test_delivery_error_is_propagated_for_retry(self):
         connection = Mock()
         error = GLib.Error.new_literal(Gio.io_error_quark(), 'failed', Gio.IOErrorEnum.TIMED_OUT)

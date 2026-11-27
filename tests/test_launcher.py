@@ -23,6 +23,21 @@ class LauncherTests(unittest.TestCase):
                 install(source, root)
             self.assertEqual(path.read_text(encoding='utf-8'), content)
 
+    def test_activation_file_is_installed_and_foreign_file_preserved(self):
+        from clam_gui.activation import install_activation
+        from clam_gui.desktop_notifications import APP_ID
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(__file__).resolve().parents[1]
+            desktop = install(source, root)
+            service = Path(root)/'dbus-1/services'/(APP_ID+'.service')
+            self.assertIn('DBusActivatable=true', desktop.read_text())
+            self.assertIn('--gapplication-service', service.read_text())
+            self.assertTrue(install_activation(source, root))
+            service.write_text('foreign')
+            with self.assertRaises(ValueError):
+                install_activation(source, root)
+            self.assertEqual(service.read_text(), 'foreign')
+
     def test_escaping_and_newlines(self):
         value = exec_arg('/tmp/a b%"$')
         self.assertIn('%%', value)

@@ -24,11 +24,11 @@ class NotificationOutbox:
                        'urgency TEXT NOT NULL, merge_key TEXT UNIQUE, count INTEGER NOT NULL, '
                        'attempts INTEGER NOT NULL, due REAL NOT NULL, claim TEXT, lease_until REAL NOT NULL DEFAULT 0)')
             columns = {row[1] for row in db.execute('PRAGMA table_info(notification_outbox)')}
-            for column, definition in [('claim', 'TEXT'), ('lease_until', 'REAL NOT NULL DEFAULT 0')]:
+            for column, definition in [('claim', 'TEXT'), ('lease_until', 'REAL NOT NULL DEFAULT 0'), ('target', 'TEXT NOT NULL DEFAULT ""')]:
                 if column not in columns:
                     db.execute(f'ALTER TABLE notification_outbox ADD COLUMN {column} {definition}')
 
-    def enqueue(self, title, body, urgency='normal', *, count=1):
+    def enqueue(self, title, body, urgency='normal', *, count=1, target=''):
         if type(count) is not int or not 1 <= count <= 2**63-1:
             raise ValueError('通知件数が不正です。')
         self.next_poll = 0
@@ -41,8 +41,8 @@ class NotificationOutbox:
             db.execute('BEGIN IMMEDIATE')
             rows = db.execute('SELECT count(*) FROM notification_outbox WHERE merge_key IS NULL').fetchone()[0]
             if rows < self.LIMIT:
-                db.execute('INSERT INTO notification_outbox (title,body,urgency,count,attempts,due) VALUES (?,?,?,?,0,?)',
-                           (title[:256], body[:8192], urgency, count, self.clock()))
+                db.execute('INSERT INTO notification_outbox (title,body,urgency,count,attempts,due,target) VALUES (?,?,?,?,0,?,?)',
+                           (title[:256], body[:8192], urgency, count, self.clock(), target[:2048]))
             else:
                 # Two reserved summary rows bound storage while retaining every notice count.
                 db.execute('INSERT INTO notification_outbox (title,body,urgency,merge_key,count,attempts,due) '
@@ -65,7 +65,7 @@ class NotificationOutbox:
         claim = uuid.uuid4().hex
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT id,title,body,urgency,merge_key,count,attempts FROM notification_outbox '
+            row = db.execute('SELECT id,title,body,urgency,merge_key,count,attempts,target FROM notification_outbox '
                              "WHERE due<=? AND (claim IS NULL OR lease_until<=?) ORDER BY (urgency='critical') DESC,id LIMIT 1",
                              (self.clock(),self.clock())).fetchone()
             if row is not None:
@@ -73,12 +73,12 @@ class NotificationOutbox:
                            (claim,self.clock()+60,row[0]))
         if row is None:
             return False
-        ident, title, body, urgency, merge, count, attempts = row
+        ident, title, body, urgency, merge, count, attempts, target = row
         if merge:
             detail = '検出・警告または検査不完了' if urgency == 'critical' else '正常終了'
             body = f'{detail}の通知が{count}件あります。検査プランのログを確認してください。'
         try:
-            self.deliver(title, body, urgency)
+            self.deliver(title, body, urgency, **({'target': target} if target else {}))
         except Exception as error:
             with self.store.connect() as db:
                 db.execute('UPDATE notification_outbox SET attempts=attempts+1,due=?,claim=NULL,lease_until=0 WHERE id=? AND claim=?',

@@ -128,7 +128,10 @@ def check():
         quit_mock.assert_called_once()
     key = app.store.save_profile(Plan('試験対象', [str(Path.home())], []))
     plan = dict(app.store.profiles())[key]
-    app.store.save('2026-11-16T10:00:00+09:00', plan.describe(), '検査完了', 'normal log', key)
+    from clam_gui.results import ScanStatus, ResultKind
+    from clam_gui.notifications import notification_target
+    first_status = ScanStatus('検査完了', ResultKind.CLEAN)
+    app.store.save('2026-11-16T10:00:00+09:00', plan.describe(), first_status, 'normal log', key)
     app.store.save('2026-11-16T11:00:00+09:00', plan.describe(), '検出あり' + MAILBOX_NOTE, mailbox_guidance([('/example/INBOX', False)]), key)
     app.refresh_profiles(key)
     settle_history()
@@ -142,6 +145,16 @@ def check():
     assert narrow_height > wide_height, (narrow_height, wide_height)
     assert app.engine_refresh.get_sensitive()
     assert len(app.log_entries) == 2
+    app.activate_action('open-result', GLib.Variant('s', notification_target(key, first_status)))
+    settle_history()
+    assert app.selected_profile()[0] == key
+    assert app.history_list.get_selected_row().get_index() == 1
+    assert app.history_controller.shown == app.log_entries[1].id
+    app.history(None)
+    settle_history()
+    assert app.history_list.get_selected_row().get_index() == 1
+    app.history_list.select_row(app.history_list.get_row_at_index(0))
+    settle_history()
     assert app.history_list.get_row_at_index(0).get_child().get_attributes() is not None
     assert app.history_list.get_row_at_index(1).get_child().get_attributes() is None
     app.history_list.select_row(app.history_list.get_row_at_index(0))

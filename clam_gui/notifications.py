@@ -2,6 +2,7 @@
 from .results import assess, ResultKind, output_was_truncated, detection_uncertain, found_signature
 from collections import Counter
 import datetime
+import json
 from dataclasses import dataclass
 import time
 from pathlib import Path
@@ -129,11 +130,31 @@ def scan_notification(label, status, output, started=None, finished=None, defini
     return title, f'検査プラン：{label}\n{message}', urgency
 
 
+def notification_target(key, status):
+    if not isinstance(key, str) or not key or len(key) > 256:
+        return ''
+    token = getattr(status, 'notification_token', '')
+    return json.dumps([key, token], ensure_ascii=False, separators=(',', ':'))
+
+
+def parse_notification_target(value):
+    try:
+        data = json.loads(value)
+        if isinstance(data, list) and len(data) == 2:
+            key, token = data
+            if isinstance(key, str) and 0 < len(key) <= 256 and isinstance(token, str) and (not token or re.fullmatch('[0-9a-f]{32}', token)):
+                return key, token
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
 @dataclass(frozen=True)
 class AutomaticNotice:
     title: str
     body: str
     urgency: str = 'normal'
+    target: str = ''
 
 
 class AutomaticNotices:
@@ -144,17 +165,17 @@ class AutomaticNotices:
 
     def record(self, key, label, status, output=''):
         if assess(status, output).clean:
-            count, start, _ = self.pending.get(key, (0, self.clock(), label))
-            self.pending[key] = count + 1, start, label
+            count, start, _, _ = self.pending.get(key, (0, self.clock(), label, ''))
+            self.pending[key] = count + 1, start, label, notification_target(key, status)
             return None
-        return AutomaticNotice(*scan_notification(label, status, output))
+        return AutomaticNotice(*scan_notification(label, status, output), target=notification_target(key, status))
 
     def flush(self, key):
         value = self.pending.pop(key, None)
         if value:
-            count, _, label = value
-            return AutomaticNotice('ClamAV 自動検査完了', f'検査プラン：{label}\n検出なし（{count}回の検査）。')
+            count, _, label, target = value
+            return AutomaticNotice('ClamAV 自動検査完了', f'検査プラン：{label}\n検出なし（{count}回の検査）。', target=target)
         return None
 
     def due(self, force=False):
-        return [key for key, (_, start, _) in self.pending.items() if force or self.clock()-start >= self.delay]
+        return [key for key, (_, start, _, _) in self.pending.items() if force or self.clock()-start >= self.delay]

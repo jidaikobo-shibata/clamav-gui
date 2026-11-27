@@ -5,7 +5,7 @@ import uuid
 APP_ID = 'com.jidaikobo.ClamAVGui'
 
 
-def send(title, body, urgency='normal'):
+def send(title, body, urgency='normal', *, target=''):
     from gi.repository import Gio, GLib
     try:
         connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -13,6 +13,9 @@ def send(title, body, urgency='normal'):
         # failed deliveries stay in the monitoring process's retry outbox.
         details = {'title': GLib.Variant('s', title), 'body': GLib.Variant('s', body),
                    'priority': GLib.Variant('s', 'urgent' if urgency == 'critical' else 'normal')}
+        if target:
+            details['default-action'] = GLib.Variant('s', 'app.open-result')
+            details['default-action-target'] = GLib.Variant('s', target)
         connection.call_sync('org.gtk.Notifications', '/org/gtk/Notifications',
             'org.gtk.Notifications', 'AddNotification',
             GLib.Variant('(ssa{sv})', (APP_ID, uuid.uuid4().hex, details)),

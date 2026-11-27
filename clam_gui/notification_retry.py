@@ -73,7 +73,8 @@ class NotificationRetry:
         if not isinstance(data, list) or len(data) > self.LIMIT + 2:
             raise ValueError('通知の退避内容が不正です。')
         for row in data:
-            if (not isinstance(row, dict) or set(row) != {'title','body','urgency','count','summary'} or
+            if (not isinstance(row, dict) or set(row) not in ({'title','body','urgency','count','summary'}, {'title','body','urgency','count','summary','target'}) or
+                not isinstance(row.get('target',''), str) or len(row.get('target','')) > 2048 or
                 not isinstance(row['title'], str) or len(row['title']) > 256 or
                 not isinstance(row['body'], str) or len(row['body']) > 8192 or
                 row['urgency'] not in ('normal','critical') or type(row['summary']) is not bool or
@@ -104,7 +105,7 @@ class NotificationRetry:
         except (OSError, ValueError) as error:
             self.error = str(error)[:256]
         urgency = 'critical' if notice.urgency == 'critical' else 'normal'
-        self._add_row(dict(title=notice.title[:256],body=notice.body[:8192],urgency=urgency,count=1,summary=False))
+        self._add_row(dict(title=notice.title[:256],body=notice.body[:8192],urgency=urgency,count=1,summary=False, **({'target': notice.target} if notice.target else {})))
         if self.error and self.loaded:
             try:
                 self.persist()
@@ -159,10 +160,10 @@ class NotificationRetry:
                 body = row['body']
                 if row['summary']:
                     body = f"未保存の通知が{row['count']}件あります。検査プランのログを確認してください。"
-                if row['count'] == 1:
-                    enqueue(row['title'], body, row['urgency'])
-                else:
-                    enqueue(row['title'], body, row['urgency'], count=row['count'])
+                kwargs = {'count': row['count']} if row['count'] != 1 else {}
+                if row.get('target') and not row['summary']:
+                    kwargs['target'] = row['target']
+                enqueue(row['title'], body, row['urgency'], **kwargs)
                 self.rows.remove(row)
                 changed = True
             self.error = self.recovery_error

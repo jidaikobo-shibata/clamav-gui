@@ -93,9 +93,9 @@ class LinuxBackend:
         except (OSError, ValueError, IndexError):
             return None
 
-    def notify(self, title, body, urgency='normal'):
+    def notify(self, title, body, urgency='normal', *, target=''):
         from ..desktop_notifications import send
-        send(title, body, urgency)
+        send(title, body, urgency, target=target)
 
     def install_stop_handlers(self, callback):
         import signal

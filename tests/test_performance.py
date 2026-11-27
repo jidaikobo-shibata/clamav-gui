@@ -41,7 +41,7 @@ class PerformanceTests(unittest.TestCase):
     def test_legacy_headers_preserve_detection_and_completion(self):
         plan = Plan('test', [self.temp.name], [])
         with self.store.connect() as db:
-            db.execute('INSERT INTO scans VALUES (?,?,?,?,?,?,?,?,?)',
+            db.execute('INSERT INTO scans (started,target,status,output,profile_id,completed_at,detected,log_bytes,result_kind) VALUES (?,?,?,?,?,?,?,?,?)',
                        ('2026-01-01',plan.describe(),'検出あり','End Date: 2026:11:18 12:34:56\n',None,None,None,None,None))
         entry = self.store.history_headers('p',plan)[0]
         self.assertTrue(entry.is_detected())

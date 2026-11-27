@@ -14,7 +14,7 @@ from clam_gui.results import assess
 from clam_gui.core import Store, scan, record_scan_failure
 from clam_gui.execution import ScanAlreadyQueued
 from clam_gui.schedule import read_schedule
-from clam_gui.notifications import definition_status, scan_notification
+from clam_gui.notifications import definition_status, scan_notification, notification_target
 
 
 def main(argv=None, cancel=None):
@@ -65,7 +65,8 @@ def main(argv=None, cancel=None):
             print('通知を送れませんでした。アプリの通知設定と検査履歴を確認してください。', file=sys.stderr)
         return 0 if status.startswith('検査完了') else 2
     try:
-        get_backend().notify(title, body, urgency)
+        backend = get_backend()
+        backend.notify(title, body, urgency, **({'target': notification_target(args.profile, status)} if sys.platform.startswith('linux') else {}))
     except (OSError, RuntimeError, subprocess.TimeoutExpired):
         print('デスクトップ通知を送れませんでした。履歴を確認してください。', file=sys.stderr)
     return 0 if assess(status, output).clean else 2

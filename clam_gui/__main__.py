@@ -1,5 +1,5 @@
 """Run with /usr/bin/python3 -m clam_gui."""
-from .notifications import AutomaticNotices, scan_notification
+from .notifications import AutomaticNotices, scan_notification, notification_target, parse_notification_target
 from dataclasses import replace
 import threading
 import shutil
@@ -49,6 +49,34 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
         self.install_prompt_checked = False
         self.install_prompt = None
         self.setup_window = None
+
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+        action = Gio.SimpleAction.new('open-result', GLib.VariantType.new('s'))
+        action.connect('activate', lambda _, value: self.open_notification_result(value.get_string()))
+        self.add_action(action)
+        if self.backend.name == 'linux':
+            from .activation import install_activation
+            from pathlib import Path
+            try:
+                install_activation(Path(__file__).resolve().parents[1])
+            except (OSError, ValueError) as error:
+                self.activation_error = str(error)
+
+    def open_notification_result(self, value):
+        self.activate()
+        target = parse_notification_target(value)
+        if not target:
+            return
+        key, token = target
+        self.refresh_profiles(key)
+        selected = self.selected_profile()
+        if selected and selected[0] == key:
+            self.history(None, token=token, latest=not token)
+        elif key == MEDIA_ID:
+            self.media_history(token=token)
+        else:
+            self.show_notice('通知の検査プランは削除されたため表示できません。')
 
     def do_activate(self):
         if self.get_active_window():
@@ -179,6 +207,8 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
         self.automation_timer = GLib.timeout_add(500, self.tick_automation)
         self.state_timer = GLib.timeout_add_seconds(1, self.poll_plans)
         window.present()
+        if getattr(self, "activation_error", None):
+            self.show_notice(self.activation_error)
         self.refresh_engine_status()
         self.install_prompt_timer = GLib.timeout_add(250, self.offer_install)
 
@@ -594,9 +624,9 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
             self.automatic_notice_timers[key] = GLib.timeout_add_seconds(20, self.flush_automatic_notice, key, True)
 
     def deliver_automatic_notice(self, key, notice):
-        self.desktop_notice('automatic-' + key, notice.title, notice.body, notice.urgency)
+        self.desktop_notice('automatic-' + key, notice.title, notice.body, notice.urgency, target=notice.target)
 
-    def desktop_notice(self, key, title, body, urgency='normal'):
+    def desktop_notice(self, key, title, body, urgency='normal', *, target=''):
         if self.backend.name in ('win32', 'darwin'):
             def worker():
                 try:
@@ -607,6 +637,8 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
             return
         notification = Gio.Notification.new(title)
         notification.set_body(body)
+        if target:
+            notification.set_default_action_and_target('app.open-result', GLib.Variant('s', target))
         if urgency == 'critical':
             notification.set_priority(Gio.NotificationPriority.HIGH)
         self.send_notification(key, notification)
@@ -736,7 +768,7 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
         plan = dict(self.store.profiles()).get(key)
         title, body, urgency = scan_notification(plan.label if plan else '検査', status, output,
                                                  store=self.store, key=key)
-        self.desktop_notice('scan-result', title, body, urgency)
+        self.desktop_notice('scan-result', title, body, urgency, target=notification_target(key, status))
         return False
 
 
@@ -824,4 +856,4 @@ class Application(PlanEditor, AdminHelperWindow, PreferencesWindow, PackageWindo
 
 
 if __name__ == '__main__':
-    raise SystemExit(Application().run())
+    raise SystemExit(Application().run(sys.argv))

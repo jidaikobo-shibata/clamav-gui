@@ -60,7 +60,7 @@ class Store:
             if 'profile_id' not in {row[1] for row in db.execute('PRAGMA table_info(scans)')}:
                 db.execute('ALTER TABLE scans ADD COLUMN profile_id TEXT')
             columns = {row[1] for row in db.execute('PRAGMA table_info(scans)')}
-            for column, kind in [('completed_at', 'TEXT'), ('detected', 'INTEGER'), ('log_bytes', 'INTEGER'), ('result_kind', 'TEXT')]:
+            for column, kind in [('completed_at', 'TEXT'), ('detected', 'INTEGER'), ('log_bytes', 'INTEGER'), ('result_kind', 'TEXT'), ('notification_token', 'TEXT')]:
                 if column not in columns:
                     db.execute(f'ALTER TABLE scans ADD COLUMN {column} {kind}')
             db.execute('CREATE TABLE IF NOT EXISTS profiles '
@@ -75,6 +75,7 @@ class Store:
             db.execute('CREATE TABLE IF NOT EXISTS preferences '
                        '(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
             db.execute('CREATE INDEX IF NOT EXISTS scans_profile ON scans(profile_id)')
+            db.execute('CREATE UNIQUE INDEX IF NOT EXISTS scans_notification_token ON scans(notification_token) WHERE notification_token IS NOT NULL')
             db.execute('CREATE INDEX IF NOT EXISTS scans_legacy_target ON scans(target) WHERE profile_id IS NULL')
         with self.connect() as db:
             initialize_retention(db)
@@ -100,18 +101,27 @@ class Store:
                       encoded[-(budget-384*1024):].decode('utf-8', errors='ignore'))
         size = len((target + status + output).encode('utf-8')) + 128
         completed = completed_at or datetime.datetime.now().astimezone()
+        notification_token = uuid.uuid4().hex
         with self.connect() as db:
             if not wait:
                 db.execute('PRAGMA busy_timeout=0')
             policy = self.automation_settings(db=db)
-            cursor = db.execute('INSERT INTO scans (started, target, status, output, profile_id, completed_at, detected, log_bytes, result_kind) '
-                       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            cursor = db.execute('INSERT INTO scans (started, target, status, output, profile_id, completed_at, detected, log_bytes, result_kind, notification_token) '
+                       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                        (started, target, status, output, profile_id,
                         completed.isoformat(timespec='seconds'),
-                        int(result.detected), size, result.kind.value))
+                        int(result.detected), size, result.kind.value, notification_token))
             db.execute('INSERT INTO retention_info VALUES (?,?,?,?)',
                        (cursor.lastrowid, completed.replace(microsecond=0).timestamp(), int(not result.clean), size))
             prune(db, policy)
+        if isinstance(status, ScanStatus):
+            status.notification_token = notification_token
+
+    def notification_entry(self, key, token, *, header_only=False):
+        with self.connect() as db:
+            body = "''" if header_only else 'output'
+            row = db.execute(f"SELECT rowid,started,completed_at,detected,target,status,{body},result_kind FROM scans WHERE profile_id=? AND notification_token=?", (key, token)).fetchone()
+        return HistoryEntry(*row) if row else None
 
     def automation_settings(self, db=None):
         values = dict(AUTOMATION_DEFAULTS)

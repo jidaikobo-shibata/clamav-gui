@@ -33,7 +33,7 @@ def render_entry(source, python='/usr/bin/python3'):
              'Comment[ja]=ClamAVでフォルダーを検査し、結果を確認します\n'
              'Exec=' + ' '.join(exec_arg(arg) for arg in args) + '\n'
              'Icon=' + desktop_string(project/'assets/clamav-gui.svg') + '\n'
-             'Terminal=false\nStartupNotify=true\nX-GNOME-UsesNotifications=true\nCategories=Utility;Security;\n'
+             'Terminal=false\nStartupNotify=true\nDBusActivatable=true\nX-GNOME-UsesNotifications=true\nCategories=Utility;Security;\n'
              'Keywords=ClamAV;antivirus;scan;\nStartupWMClass=' + app_id + '\n')
     return app_id + '.desktop', entry
 
@@ -47,6 +47,9 @@ def install(source, data_home=None):
         raise FileExistsError('Existing launcher was left unchanged: ' + str(destination))
     with destination.open('x', encoding='utf-8') as file:
         file.write(content)
+    sys.path.insert(0, str(Path(source).resolve()))
+    from clam_gui.activation import install_activation
+    install_activation(source, data)
     return destination
 
 
